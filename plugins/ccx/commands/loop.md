@@ -1,6 +1,6 @@
 ---
 description: "Automated dev loop — (implement → codex review → fix) × N → handoff → commit"
-argument-hint: "[--loops N] [--min-severity LEVEL] [--min-confidence N] [--commit] [--worktree[=NAME]] [--chat] <task description>"
+argument-hint: "[--loops N] [--min-severity LEVEL] [--min-confidence N] [--commit] [--worktree[=NAME]] [--chat] [--duet] [--codex-first] <task description>"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, AskUserQuestion, TaskCreate, TaskUpdate, mcp__ccx-chat__chat_register, mcp__ccx-chat__chat_send, mcp__ccx-chat__chat_ask, mcp__ccx-chat__chat_set_phase, mcp__ccx-chat__chat_close
 ---
 
@@ -21,7 +21,15 @@ Parse the raw arguments:
 - `--commit` — auto-commit without asking (skip the prompt), subject to the Phase 4 auto-commit gate.
 - `--worktree` or `--worktree=NAME` — run the entire loop in an isolated git worktree on a new branch. Enables parallel tasks in the same repo without `git diff` cross-contamination (Codex review relies on the working tree diff). The name, if supplied, MUST use the `=` form (`--worktree=feat-auth`) — a space-separated positional value is NOT accepted because it would be ambiguous with the first word of the task description (e.g. `--worktree fix auth bug` cannot distinguish `fix` as a name versus the first task word). Bare `--worktree` generates a timestamp name. Branch = `ccx/<NAME>`, worktree path = `<repo>-<NAME>`. See Phase 0.5.
 - `--chat` — bridge this run to Discord via the `ccx-chat` MCP server. Announces session start, sends per-cycle summaries, asks the commit question in Discord (with `AskUserQuestion` as fallback), and announces session close. Requires one-time `/ccx:chat-setup`. See Phase 0.7.
+- `--duet` — M8b duet mode. Claude and Codex alternate as implementer, each reviewing the other's last implement turn. Replaces the default single-implementer Phase 2 with the duet inner loop described in **Phase 2-Duet** below; Phases 0/0.5/0.7/1/3/4 are unchanged. SSOT: `docs/supervisor-design.md` §17.
+- `--codex-first` — flip the duet lead so Codex implements first (Claude reviews first). Only meaningful with `--duet`; supplying it without `--duet` is a parse-time fatal error (`--codex-first requires --duet`) per §17.3 — a silent no-op would let the user believe duet was enabled when it was not, and a stray flag is a typo worth surfacing immediately.
 - Everything else is the **task description**.
+
+**Duet flag validation** (runs at argument-parse time, before any phase executes):
+
+- `--codex-first` without `--duet` → STOP with `--codex-first requires --duet`.
+- `--duet` with `--loops` resolved to less than `2` → STOP with `--duet requires --loops >= 2 (convergence needs two reviewer approvals from different reviewers)`. Per §17.9, convergence under duet needs at least two consecutive approvals from different reviewers (≥3 review turns counting one empty-implement turn between them), so `--duet --loops 1` can never reach the `approved` exit and the run would always exit `budget-exhausted` after one cycle. Reject early to avoid the wasted spawn.
+- Both `--duet` and `--codex-first` are boolean toggles; do NOT accept `--duet=<value>` or `--codex-first=<value>` forms — reject any token whose name fragment matches one of these flags but carries an `=` with `STOP: --duet / --codex-first are boolean toggles; got '<token>'`. Without this, a typo like `--codex-first=true` would slip through the duet-validation pass and fall through to the "everything else is the **task description**" catch-all, silently running Claude-first instead of failing — exactly the silent no-op the `--codex-first requires --duet` rule above exists to prevent.
 
 Finding identity: throughout the loop, a finding's stable key is the logical **tuple `(file, title, body)`** — compared field-by-field, not as a concatenated string. Title and body can legitimately contain `:` or other delimiters, so concatenation would collapse distinct findings; equality/lookup must treat the three fields independently (e.g. `JSON.stringify([file, title, body])` is an acceptable concrete representation). Line numbers are deliberately excluded because fixes shift them and would otherwise defeat stuck-finding detection. `body` is included as a discriminator so that multiple distinct findings sharing a generic title in the same file (e.g. two separate "Unused import" findings) do NOT share a streak counter.
 
@@ -29,6 +37,8 @@ Examples:
 - `/ccx:loop --loops 3 Fix pagination bug in /api/users` → 3 cycles, ask commit.
 - `/ccx:loop --commit --min-severity medium Add input validation` → 2 cycles, fix medium+ only, auto-commit.
 - `/ccx:loop --loops 1 --commit Update error messages` → 1 cycle, auto-commit.
+- `/ccx:loop --duet --loops 3 --commit Refactor request parser` → duet mode, up to 3 implement+review cycles (Claude leads), auto-commit on convergence.
+- `/ccx:loop --duet --codex-first --loops 4 --commit Restore JSON error envelope` → duet with Codex implementing first.
 
 ---
 
@@ -133,7 +143,9 @@ After successful register, call `chat_set_phase({sessionId: CHAT_SESSION_ID, pha
 
 ## Phase 1: Implement
 
-Implement the task. Write code, ensure it compiles/runs.
+**Branch on `--duet`.** When `--duet` is set, **skip Phase 1 entirely** and jump straight to Phase 2-Duet. In duet mode the very first turn (`T1`) is the lead implementer's pass — running Phase 1 first would have Claude implement normally, then the duet driver run another implement turn against the result. That would (a) silently violate `--codex-first` by giving Claude the first effective implement turn even when the user asked Codex to lead, (b) make the first review evaluate two stacked implementations instead of the lead's single turn, and (c) burn an implementation+test pass outside the duet's `--loops N` budget. The duet driver's `T1` covers the initial implementation; the test gate moves inside the duet driver (it runs after every implement turn whose snapshot equality check reports a non-empty diff, per Phase 2-Duet step 2's `lastTestStatus` update).
+
+Otherwise (non-duet mode), implement the task. Write code, ensure it compiles/runs.
 
 **Test gate:** if the project has a test runner and the task touches code under test, run the relevant tests before entering the review loop. If tests fail, fix them first — Codex review is more expensive than a local test run, and broken builds inflate finding counts.
 
@@ -142,6 +154,8 @@ When implementation compiles and tests pass (or no tests apply), proceed to the 
 ---
 
 ## Phase 2: Review Loop
+
+**Branch on `--duet`.** When `--duet` is set, skip this section entirely and run **Phase 2-Duet** below instead — the duet driver replaces the single-implementer review loop with the §17 alternation contract. All other phases (0, 0.5, 0.7, 1, 3, 4) are shared between the two modes; only Phase 2 is mode-specific.
 
 Up to N cycles, with one-approval early exit. Maintain a `findingStreak` map across cycles, keyed by the `(file, title, body)` tuple, counting how many consecutive cycles that finding has appeared in (used for stuck-finding detection).
 
@@ -217,6 +231,177 @@ Skip Step C entirely when `verdict == "approve"` AND in-scope is empty.
 2. No in-scope findings (verdict may still be `needs-attention` because everything was filtered) → break as **filtered-clean**. The final report MUST state that skipped findings exist so the user knows Codex is not fully satisfied. Phase 4 commit is allowed (the user opted into the filter).
 3. `i == N` → break (budget exhausted). Report unresolved / needs-attention status if applicable.
 4. Otherwise continue to cycle `i+1`. Any `unresolved` findings this cycle do not short-circuit — the next review will re-surface them.
+
+---
+
+## Phase 2-Duet: Alternating implementer loop (only if `--duet` is set)
+
+M8b duet mode. SSOT: `docs/supervisor-design.md` §17. Claude and Codex alternate as implementer; each side's review turn evaluates the other side's last implement turn. Convergence requires two consecutive approvals from different reviewers, with no intervening reject and no intervening implement turn that produced a non-empty diff. Up to `--loops N` cycles, where **one cycle = one implement + one review turn (two turns total)** — `--duet --loops 3` allows 3 implement + 3 review turns total, NOT 3 four-turn alternations (§17.9).
+
+**Driver state** — initialized once at Phase 2-Duet entry:
+
+- `approval_counter = 0` — incremented on every reviewer approve; reset on any reviewer reject or any non-empty implement diff; preserved across empty implement turns. Termination fires when `approval_counter == 2` (§17.4).
+- `last_implementer ∈ {"claude", "codex"}` — initialized to `"codex"` when `--codex-first` is set, else `"claude"`. Set on every implement turn so the next implement turn (after a reject) can identify the same side per §17.2 rule 2.
+- `last_review_outcome ∈ {"approve", "reject", null}` — `null` before the first review; updated on every review turn. Drives the §17.2 alternation rule: on approve, the implementer role flips; on reject, the same implementer re-runs.
+- `findingStreak` — same `(file, title, body)` keyed map as the non-duet loop, but populated from BOTH reviewers' findings. Streak counter increments per review turn (not per cycle), so the §17.9 "stuck-finding key recurs across three consecutive review turns from either reviewer" rule fires at count `== 3`.
+- `cycles_used = 0` — counts completed implement+review pairs. Incremented at the end of each Claude-review or Codex-review turn that observed a preceding implement turn this cycle. Used to enforce the `--loops N` budget.
+- `last_stuck_implementer_side ∈ {"claude", "codex", null}` — tracks which side ran the most-recent **non-empty** implement turn. Updated on every implement turn whose diff is non-empty; preserved across empty turns. Used by §17.9's `M8B_STUCK_SIDE` log-line emission immediately before `chat_close({status: "stuck"})`.
+- `had_filtered_review = false` — sticky boolean (false → true on the first review turn that hits the "approval-like outcome" branch with `verdict == "needs-attention"` AND in-scope count zero; never reset). Used by the per-turn algorithm to pick `filtered-clean` vs `approved` when `approval_counter` reaches 2: any single filtered review along the converging chain is enough to taint the exit status, so the user sees that neither reviewer was fully unfiltered-approving.
+- `lastTestStatus` — same `pass | fail | n-a` semantics as the non-duet loop's Step C, captured after every implement turn that produced a non-empty diff (whether Claude's or Codex's). The Phase 4 auto-commit gate uses the FINAL value.
+
+### Style ping-pong mitigation clause (§17.6)
+
+This exact clause is **prepended verbatim** to every implementer prompt — both Claude implement turns and Codex implement turns, on every cycle including the first. First-turn redundancy ("when a previous implementer turn …" → there is none) is deliberate: producing the prompt by string concatenation rather than branching keeps the implementer-spawn primitive identical across turns.
+
+> When a previous implementer turn already touched this task, preserve that turn's file structure, naming, and code style. Limit your edits to the specific issue the latest review surfaced (or the missing piece this turn is responsible for). Do not reformat, refactor, or rename unrelated code. If the previous review approved and you have nothing substantive to add, return without edits — an empty diff is the correct response, not a flaw.
+
+### Implementer primitives
+
+**Claude implement** — drive the implementation with the same Read/Write/Edit/Bash/Grep/Glob toolset Phase 1 uses. The implementer's "prompt" is built by the driver as: the style clause above + the task brief excerpt + (if `last_review_outcome == "reject"`) the verbatim findings from the most recent review turn + (if the most recent review was approve) the instruction "the previous review approved; return without edits unless you have a substantive correction." The driver then performs the implementation directly in this Claude session — no sub-Agent spawn is required for Claude's own implement turns because the worker IS Claude.
+
+**Codex implement** (§17.8) — invoke via `codex-companion.mjs task --write --json`. Resolve `CODEX_ROOT` with the same inline snippet Phase 2 Step A uses, then run:
+
+```bash
+CODEX_ROOT="$(find ~/.claude/plugins/marketplaces/openai-codex/plugins/codex ~/.claude/plugins/cache/openai-codex/codex -maxdepth 0 -type d 2>/dev/null | head -1)" && node "$CODEX_ROOT/scripts/codex-companion.mjs" task --write --json "$DUET_CODEX_PROMPT"
+```
+
+**Worktree mode:** if `--worktree` is set, prefix every duet shell call (this Codex invocation, the Claude review Agent's repo-root probes, the implement-turn snapshot calls, and `git diff --stat`) with `cd "<WORKTREE_CWD>" &&` — same contract as Phase 2 Step A. Codex's `--write` flag must edit files inside the worktree, never the original checkout, or every duet review would see no diff and converge spuriously.
+
+`$DUET_CODEX_PROMPT` is built identically to Claude's implement prompt (style clause + brief excerpt + reject findings or approve instruction), routed to the Codex CLI instead of executed in-session. **No `--model` / `--effort` is passed** — Codex stays at the companion's runtime default per §17.5; M7's ladder applies to the Claude side only.
+
+If this command fails on the **first** Codex implement turn (binary missing, `CODEX_ROOT` empty, non-zero exit, malformed JSON, or `node` error), STOP the duet by setting `duet_exit_status = "error"` and breaking out of the per-turn loop. Print to the worker log:
+
+> Codex is not available — duet cannot proceed. Install: `npm install -g @openai/codex && codex login`. Plugin: `/plugin install codex@openai-codex`. Your implementation up to this point is preserved on disk under the worker branch.
+
+Do NOT call `chat_close({status: "error"})` directly from here — Phase 4's single-close path is the only `chat_close` invocation site. Phase 4 reads `duet_exit_status` and passes it through; the `error` status reaches the broker via the same path the `approved` / `stuck` / `budget-exhausted` statuses do, which preserves the broker's recent-closures ring's single-entry-per-session invariant that the supervisor's M7 sub-classifier depends on.
+
+Do NOT fall back to single-model Claude mid-run: the user opted into `--duet` explicitly and a silent downgrade would violate that contract. On a **later-cycle** Codex failure, the same `duet_exit_status = "error"` exit applies and partial work stays on disk (no commit). The worker log captures the verbatim companion stderr.
+
+### Reviewer primitives
+
+**Codex review** — reuse Phase 2 Step A's exact one-liner (`node "$CODEX_ROOT/scripts/codex-companion.mjs" review --wait --json`). Apply the same first-cycle Codex-unavailable fatal-exit semantics described in Phase 2 Step A. Parse the JSON `{verdict, summary, findings, next_steps}` shape unchanged.
+
+**Claude review** (§17.7) — sub-Claude `Agent` spawn invoking the project's installed `code-review` skill against the worker's current diff. Use the `Agent` tool with `subagent_type: "general-purpose"` (the stock-install built-in catch-all; the `code-review` skill is invoked from the subagent's prompt, not via a dedicated subagent type, so `general-purpose` is the right surface to drive it). The prompt is fenced below with **four backticks** so the inner triple-backtick JSON example does not close the outer fence prematurely — keep this distinction when adapting the prompt:
+
+````
+You are a sub-Claude reviewer in /ccx:loop --duet mode. Your job is to
+review the current worktree diff using the installed `code-review` skill.
+
+Working directory: <WORKTREE_CWD when --worktree is set, else REPO_ROOT>
+Severity floor: --min-severity = <value>
+Confidence floor: --min-confidence = <value>
+
+Steps:
+1. Run the `code-review` skill against the current diff (the same diff
+   `git diff HEAD` would print). Apply the severity/confidence floors
+   above when deciding which findings to surface.
+2. Your final response MUST end with a fenced JSON block in the exact
+   shape below. The duet driver parses that block; nothing after it is
+   read.
+
+```json
+{
+  "verdict": "approve" | "needs-attention",
+  "findings": [
+    {
+      "severity": "critical|high|medium|low",
+      "title": "...",
+      "body": "...",
+      "file": "...",
+      "line_start": N,
+      "line_end": N,
+      "confidence": 0.0,
+      "recommendation": "..."
+    }
+  ]
+}
+```
+
+Do not modify any files. Do not run commands outside the working directory above.
+````
+
+Parse the Agent's reply for the final fenced `` ```json …``` `` block. A malformed or missing envelope is treated as `verdict: "needs-attention"` with one synthetic finding `{severity: "medium", title: "review-output-malformed", body: <first 200 chars of the Agent reply>, file: "(driver)", line_start: 0, line_end: 0, confidence: 1.0, recommendation: "Re-run the Claude review primitive or fall back to a manual review."}` so the convergence counter resets and the next implement turn surfaces the issue. Repeated malformed envelopes share the same `(file, title, body)` tuple and therefore flow through the §17.9 stuck-finding detector after three review turns.
+
+The driver does NOT forward `--min-severity` / `--min-confidence` to the `code-review` skill as flags (the skill's flag surface is its own contract); the values flow as instructions inside the Agent prompt above. Findings then flow through the duet driver's shared `findingStreak` map regardless of which reviewer raised them.
+
+### Per-turn algorithm
+
+Initialize the per-cycle state (`approval_counter`, `last_implementer`, `last_review_outcome`, `last_stuck_implementer_side`, `findingStreak`, `cycles_used`) from the driver state above. When `CHAT_SESSION_ID` is set, call `chat_set_phase` with `duet T1` at entry.
+
+Loop turns `T = 1, 2, 3, …` until termination. Within each turn:
+
+1. **Choose the turn's side and phase.** Strict alternation modulo the §17.2 rule-2 override:
+   - First turn (`T == 1`): implement turn run by `last_implementer` (Claude unless `--codex-first`).
+   - After an implement turn: the next turn is a review by the OTHER side.
+   - After a review turn:
+     - if `last_review_outcome == "approve"`: implement turn run by the OTHER side (role flip per §17.2 rule 1).
+     - if `last_review_outcome == "reject"`: implement turn run by the SAME implementer as the previous implement (per §17.2 rule 2 — the side that heard the criticism keeps the implement turn to address it).
+2. **Run the turn.**
+   - **Implement turn:** before spawning the primitive, snapshot the worktree state. The snapshot MUST capture the **content** of every tracked and untracked-but-not-ignored file, not just their paths. The required algorithm is the temporary-index trick — it does not pollute the real `.git/index` and is the only Git primitive that hashes untracked file bodies:
+
+     ```bash
+     SNAP_INDEX="$(mktemp)"
+     # Seed the temp index from HEAD so tracked file blob SHAs carry through.
+     # On an initial commit-less worktree (no HEAD), fall back to an empty tree.
+     GIT_INDEX_FILE="$SNAP_INDEX" git read-tree HEAD 2>/dev/null \
+       || GIT_INDEX_FILE="$SNAP_INDEX" git read-tree --empty
+     # Stage every worktree path (tracked + untracked-not-ignored) into the
+     # temp index, hashing real contents. `--all` honours .gitignore so
+     # build artefacts do not perturb the snapshot.
+     GIT_INDEX_FILE="$SNAP_INDEX" git add --all
+     SNAP_TREE="$(GIT_INDEX_FILE="$SNAP_INDEX" git write-tree)"
+     rm -f "$SNAP_INDEX"
+     ```
+
+     The simpler-looking shapes are NOT permitted because they all miss real edits:
+     - `git status --porcelain` ∪ `git diff` ∪ `git diff --cached` reports a brand-new untracked file as `?? path` (path only) and neither `git diff` form includes untracked content, so an edit to the body of an existing untracked file (a Phase-1 scratch test, an unsaved generator output, etc.) leaves every component of the union unchanged.
+     - `git add --intent-to-add` only inserts a sentinel entry into the index — it does NOT stage content. `git write-tree` then either skips intent-to-add entries entirely or records them with a synthetic empty-blob hash, so two snapshots taken before and after an edit to an existing untracked file produce identical tree SHAs.
+
+     Only the temp-index `git add --all` formulation hashes untracked file contents reliably, and the `mktemp` + `GIT_INDEX_FILE` override keeps the real index untouched so Phase 4's explicit-paths staging contract still owns the integration index.
+
+     Run the implementer primitive (in-session for Claude, `codex-companion.mjs task --write --json` for Codex). Snapshot again the same way after the primitive returns. The two tree SHAs' equality is the empty-diff signal per §17.4 — comparing pre vs post worktree state, NOT worktree vs `HEAD`, because the latter would see the accumulated task diff and reset the counter on every post-approval empty turn.
+     - **Empty diff (snapshot tree SHAs equal):** `approval_counter` is preserved; `last_stuck_implementer_side` is preserved. No `EDITED_PATHS` update needed.
+     - **Non-empty diff (snapshot tree SHAs differ):** `approval_counter = 0`; `had_filtered_review = false`; `last_stuck_implementer_side = <this turn's side>`; run the relevant project tests if applicable and update `lastTestStatus`. `had_filtered_review` resets in lockstep with `approval_counter` so the flag only describes the CURRENT convergence chain (see the reject branch below for the rationale). Per §17.4, whitespace-only and comment-only edits between snapshots count as non-empty by design — the prompt clause (§17.6) is the prevention; the snapshot equality check is the runtime backstop.
+       - **`EDITED_PATHS` accounting (Phase 4 contract — load-bearing for Codex turns).** Compute the changed-path set for this turn as `git diff --name-only <pre_tree_sha> <post_tree_sha>` — and ONLY that. Add every returned entry — stripped to **worktree-relative** form when `--worktree` is set — to the run-wide `EDITED_PATHS` set. The pre/post snapshots both used the temp-index `git add --all` formulation, which honours `.gitignore` and hashes every non-ignored worktree file (tracked AND untracked-not-ignored) into a real blob, so the diff already includes paths that the turn newly created OR modified — there is no missed-untracked-content scenario the diff cannot see. Do NOT additionally union in `git ls-files --others --exclude-standard` against the post-state: that would sweep in every untracked-not-ignored file in the worktree at this moment regardless of whether the current turn created it (e.g. coverage files a test runner produced between turns, scratch artefacts left over from Phase 1, generator output a prior turn already accounted for), which over-stages and silently violates Phase 4's "explicit paths only" contract. This step is mandatory for BOTH Claude-side and Codex-side implement turns, but it is especially load-bearing for Codex turns: Codex's `task --write` runs as an external subprocess and never invokes Claude's Edit/Write tools, so the only way its file writes reach Phase 4's staging set is this snapshot-derived accounting. Without it, an approved duet whose final non-empty implement turn was Codex would commit only Claude-tracked edits and silently drop every Codex-written path, and a `--codex-first` run with no Claude implement turns at all could produce a worker branch with no commit at all.
+     - Update `last_implementer = <this turn's side>`.
+   - **Review turn:** invoke the relevant reviewer primitive (Codex review when this turn's side is Codex, Claude review Agent when this turn's side is Claude). Parse `verdict` and `findings`. Partition findings into in-scope (severity ≥ `--min-severity` AND confidence ≥ `--min-confidence`) and skipped.
+     - For each in-scope finding's `(file, title, body)` key: if already in `findingStreak`, increment; else set to 1. Drop any keys NOT seen this turn (streak broken).
+     - **Stuck-finding check (§17.9):** if any key's count reaches `3`, set `duet_exit_status = "stuck"` and break out of the per-turn loop. Write `M8B_STUCK_SIDE: <last_stuck_implementer_side>` (literally `claude` or `codex`; if `null`, write `unknown`) as one trailing line to the worker log file inside Phase 4's `finally`-block IMMEDIATELY before the final `chat_close({status: "stuck"})` fires — NOT here in the duet driver. The supervisor's §P2.5 stuck classifier tails the last ~20 log lines on `stuck` closure and reads this token; ordering matters only relative to the close call, not relative to the duet exit, and Phase 4 is the single owner of both writes so they can be sequenced atomically. Do NOT fix the finding here; the duet relies on the next implement turn to address it, but at count 3 the budget has run out.
+     - **Approval-like outcome** — fired when EITHER `verdict == "approve"` AND in-scope count is zero, OR `verdict == "needs-attention"` AND in-scope count is zero (every raised finding fell below `--min-severity` / `--min-confidence`, so the reviewer has nothing left to push back on at the configured filter level). Both shapes are treated as a "this side has no objections" signal for convergence purposes; the §17.9 contract requires BOTH reviewers to land in this state on their respective most-recent turns before the run can converge under the filter. Concretely:
+       - `approval_counter += 1`; `last_review_outcome = "approve"` (so the alternation in step 1 flips the implementer role per §17.2 rule 1).
+       - If this turn was the filtered shape (`verdict == "needs-attention"` AND in-scope count is zero), set `had_filtered_review = true` for the run (sticky once set — a single filtered-only review anywhere in the chain that produced the two consecutive approvals taints the exit status). Otherwise leave `had_filtered_review` unchanged.
+       - If `approval_counter == 2`: convergence has fired. Set `duet_exit_status = "filtered-clean"` when `had_filtered_review == true`, else `duet_exit_status = "approved"`. Break out of the per-turn loop. Do NOT call `chat_close` here — Phase 4's existing single-close path owns every `chat_close` invocation; the duet driver only records the exit status for the final close to read. This is the only filtered-clean exit site: a single filtered review is NEVER sufficient (that would converge after one reviewer, weakening the two-reviewer guarantee for cases like `--duet --min-severity medium` where the first review happens to raise only low-severity findings); §17.9's contract is "both reviewers' remaining findings fell below the filters" and the alternation rule guarantees the second contributing review came from the other side, so reaching `approval_counter == 2` via two filtered reviews satisfies that bilaterally.
+     - Else (in-scope count > 0): `approval_counter = 0`; `had_filtered_review = false`; `last_review_outcome = "reject"`. The in-scope findings flow into the NEXT implement turn's prompt (the implementer is decided by step 1 above on the next iteration — §17.2 rule 2 keeps the same implementer in the seat). `had_filtered_review` is reset in lockstep with `approval_counter` so the flag only describes the CURRENT two-reviewer convergence chain — a filtered review from an earlier broken chain MUST NOT taint a subsequent unfiltered convergence. Without this reset, the sequence "filtered review → reject → non-empty implement → full approve → empty implement → full approve" would converge with `had_filtered_review` still true and exit as `filtered-clean`, falsely reporting that one of the two contributing reviews was filtered even though both were clean approves.
+3. **Cycle accounting.** Every time a review turn completes, `cycles_used += 1` (one implement + one review = one cycle). If `cycles_used >= --loops N` AND termination has not fired, set `duet_exit_status = "budget-exhausted"` and break out of the per-turn loop. Do NOT call `chat_close` here — Phase 4's single-close path owns every `chat_close` invocation; the duet driver only records the status for the final close to read.
+4. **Cycle summary.** Print a structured block after every review turn:
+   ```
+   Duet turn {T} — {Claude|Codex} {implement|review} — {verdict for review turns, "non-empty"/"empty" for implement turns}
+   • approval_counter: {N}
+   • cycles_used: {n}/{N}
+   • findings: {total} ({inScope} in-scope, {skipped} skipped) [review turns only]
+   ```
+   When `CHAT_SESSION_ID` is set, send the same block via `chat_send` and update phase via `chat_set_phase` with `duet T{T}`.
+
+### Exit semantics (§17.9)
+
+The duet runs inside one `/ccx:loop` worker session and emits exactly one `chat_close` status at end-of-run — fired by Phase 4's existing single-close path, NOT by the duet driver. The driver communicates its outcome to Phase 4 via the `duet_exit_status` variable described in the per-turn algorithm above (one of `approved | filtered-clean | stuck | budget-exhausted | aborted | error`); Phase 4 then passes that string verbatim into the single `chat_close({sessionId, status: duet_exit_status})` call. This preserves the broker's recent-closures ring's "one entry per session" invariant that the supervisor's M7 sub-classifier (§P2.5) depends on for cwd/branch/started_at scoping. The non-duet status taxonomy carries over unchanged:
+
+- **`approved`** — convergence rule fired (two consecutive approvals from different reviewers). Phase 4 auto-commit gate applies normally; commit subject describes the duet run.
+- **`filtered-clean`** — fired by the per-turn algorithm's approval-like outcome branch above when `approval_counter` reaches `2` AND at least one of the two contributing review turns had `verdict == "needs-attention"` with zero in-scope findings (the sticky `had_filtered_review` flag set to true by that turn). A single filtered review is NEVER sufficient — the §17.9 contract requires BOTH reviewers' most-recent contributing turns to land in the no-in-scope-objections state, and the alternation rule guarantees the two consecutive approval-like outcomes that drive `approval_counter` to 2 come from different reviewers, so reaching the exit naturally enforces the two-reviewer guarantee. Same Phase 4 semantics as the non-duet `filtered-clean` exit (Step D rule 2): the user opted into the filter, so the commit gate allows it; the final report MUST state that skipped findings exist so the user knows neither reviewer was fully unfiltered-approving. Without the two-reviewer requirement, `--duet --min-severity medium` could auto-commit after only Codex (or only Claude) had reviewed the diff and happened to raise only low-severity findings, which would silently weaken the diverse-model convergence guarantee that motivated `--duet` in the first place.
+- **`stuck`** — a single `(file, title, body)` finding key appeared in three consecutive review turns (across both reviewers). Write the `M8B_STUCK_SIDE: <side>` log line BEFORE calling `chat_close`. Phase 4 auto-commit is blocked per the existing gate.
+- **`budget-exhausted`** — `cycles_used >= --loops N` without convergence and without a stuck-finding trigger. Phase 4 auto-commit is blocked per the existing gate.
+- **`aborted`** — cancellation per the Phase 0.7 `chat_*` cancellation semantics.
+- **`error`** — uncaught exception in the duet driver, Codex companion crash on the first or later Codex implement turn (per §17.8), or Agent spawn failure during the Claude review primitive.
+
+No new `chat_close` status values are introduced — the supervisor's existing M5/M7 sub-classifier handles each status with the semantics it already has. M8b's only supervisor-side additions are the `loop-flags-rejected` brief-validation block (handled before any worker spawn) and the `M8B_STUCK_SIDE` log token (read by the supervisor's existing log-tail classifier).
+
+### M7 ladder integration scope (§17.5)
+
+M8b applies §15's 5-rung Claude model+effort ladder to the **Claude side only**. Codex stays at the companion's runtime default model and default effort for every turn it runs in M8b. Concretely:
+
+- Each Claude implement and Claude review turn inherits the rung the supervisor spawned this worker at (via `--model <alias>` / `--effort <level>` on the worker spawn line — the supervisor sets these; the worker just runs at whatever model it was launched with).
+- The Codex implement and Codex review primitives pass NO `--model` / `--effort` to `codex-companion.mjs`, matching how `/codex:rescue` invokes it today. The companion resolves Codex's default model at runtime against the local install.
+- The duet driver does NOT expose `--codex-model` / `--codex-effort` runtime knobs — those are deferred to M9 per §17.11.
 
 ---
 
