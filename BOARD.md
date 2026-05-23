@@ -185,10 +185,15 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
     include:
       - plugins/ccx/.claude-plugin/plugin.json
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on:
     - T-3
+  brief: .ccx/tasks/T-4.md
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-4"
+  branch: "ccx/T-4"
+  started_at: "2026-05-23T06:55:29Z"
   notes: |
     Bump plugins/ccx/.claude-plugin/plugin.json version from 0.3.4
     to 0.4.0 (minor bump — M8 is a behavior addition, not a bugfix)
