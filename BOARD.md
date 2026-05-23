@@ -30,7 +30,7 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
       - plugins/ccx/commands/supervisor.md
       - docs/supervisor-design.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on: []
   brief: .ccx/tasks/T-1.md
@@ -38,6 +38,8 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
   worktree: "/home/will/Repositories/ccx-loop-T-1"
   branch: "ccx/T-1"
   started_at: "2026-05-23T04:17:23Z"
+  finished_at: "2026-05-23T05:17:17Z"
+  exit_status: approved
   notes: |
     Two narrow changes to supervisor.md plus a §16 stub in
     docs/supervisor-design.md documenting them.
@@ -80,7 +82,7 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
     include:
       - docs/supervisor-design.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on:
     - T-1
@@ -89,6 +91,8 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
   worktree: "/home/will/Repositories/ccx-loop-T-2"
   branch: "ccx/T-2"
   started_at: "2026-05-23T05:18:18Z"
+  finished_at: "2026-05-23T06:13:03Z"
+  exit_status: approved
   notes: |
     SSOT for M8b. Add "## 17. M8b — Duet loop" matching §15 (M7)
     depth. Must cover:
@@ -144,7 +148,7 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
       - plugins/ccx/commands/loop.md
       - plugins/ccx/commands/supervisor.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on:
     - T-2
@@ -153,6 +157,8 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
   worktree: "/home/will/Repositories/ccx-loop-T-3"
   branch: "ccx/T-3"
   started_at: "2026-05-23T06:14:10Z"
+  finished_at: "2026-05-23T06:54:25Z"
+  exit_status: approved
   notes: |
     Implement M8b per docs/supervisor-design.md §17. Touch points:
 
@@ -185,7 +191,7 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
     include:
       - plugins/ccx/.claude-plugin/plugin.json
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on:
     - T-3
@@ -194,6 +200,8 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
   worktree: "/home/will/Repositories/ccx-loop-T-4"
   branch: "ccx/T-4"
   started_at: "2026-05-23T06:55:29Z"
+  finished_at: "2026-05-23T06:58:14Z"
+  exit_status: approved
   notes: |
     Bump plugins/ccx/.claude-plugin/plugin.json version from 0.3.4
     to 0.4.0 (minor bump — M8 is a behavior addition, not a bugfix)
