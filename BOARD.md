@@ -80,10 +80,15 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
     include:
       - docs/supervisor-design.md
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on:
     - T-1
+  brief: .ccx/tasks/T-2.md
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-2"
+  branch: "ccx/T-2"
+  started_at: "2026-05-23T05:18:18Z"
   notes: |
     SSOT for M8b. Add "## 17. M8b — Duet loop" matching §15 (M7)
     depth. Must cover:
