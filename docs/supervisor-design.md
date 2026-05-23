@@ -183,6 +183,8 @@ The brief file is the complete spec for a single task. It is the worker's read-o
 
 The schema is a **contract**. Supervisors emit exactly these six sections in this order. Workers expect this order. Empty sections are allowed (e.g. `## Out of scope\n\n_None._`) but the heading must be present — that keeps parsing schema-driven instead of heuristic.
 
+Frontmatter fields: `id`, `title`, `scope.include`, `scope.exclude`, `depends_on` are required (BOARD-sourced). Optional additive fields land here as milestones add them; M8b added `loop_flags: [...]` (string array, defaults to `[]`, see §17.3 for the worker-side semantics and the supervisor's preserve-on-overwrite contract). Future fields follow the same rule: additive, optional, defaulted, parsers MUST tolerate unknown frontmatter keys rather than rejecting the brief.
+
 ```markdown
 ---
 id: T-12
@@ -193,6 +195,7 @@ scope:
     - plugins/ccx/mcp/ccx-chat/broker.mjs
   exclude: []
 depends_on: []
+# loop_flags: ["--duet"]   # optional M8b additive field, see §17.3 — omit when not needed
 ---
 
 # Add supervisor adapter to ccx-chat broker
@@ -436,7 +439,7 @@ Phases inside `/ccx:supervisor`:
 7. **M6 — planning phase** (proposed 2026-04-18, design in §14). Free-form-input → `BOARD.md` draft, mandatory review gate before dispatch. Closes the last onboarding cliff: M1–M5 assume `BOARD.md` already exists, but today the schema is plugin-internal knowledge and the plugin ships no scaffolding. M6 makes planning the entry path so humans never hand-author YAML.
 8. **M7 — model tier escalation** (proposed 2026-04-22, design in §15). Supervisor escalates the worker model + effort tier on each `stuck` re-dispatch (same tier on `cycle-cap`), following a fixed 5-rung ladder `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)`. Adds three flags — `--max-attempts`, `--worker-loops`, `--start-tier` — and makes the "if the loop drags on, escalate to a better model" behaviour automatic. No BOARD schema change; supervisor + docs only.
 
-M1 and M2 are enough to be useful. M3–M5 are runtime quality-of-life. The pre-M6 hotfixes (§18) tighten merge history, fix a Step C deadlock failure mode, and give the supervisor its own Discord voice. M6 is the entry-path fix and is the last blocker for non-author adoption. M7 automates stuck-escalation along a fixed model+effort ladder so the human is only asked when the ladder is exhausted. M8a (§16) swaps worker exit detection over to `claude agents --json` and fast-forwards local integration to `origin/<INTEGRATION>` so every worker worktree forks from a fresh upstream base; M8b (§17, owned by T-2) is the duet loop built on top of that infra.
+M1 and M2 are enough to be useful. M3–M5 are runtime quality-of-life. The pre-M6 hotfixes (§18) tighten merge history, fix a Step C deadlock failure mode, and give the supervisor its own Discord voice. M6 is the entry-path fix and is the last blocker for non-author adoption. M7 automates stuck-escalation along a fixed model+effort ladder so the human is only asked when the ladder is exhausted. M8a (§16) swaps worker exit detection over to `claude agents --json` and fast-forwards local integration to `origin/<INTEGRATION>` so every worker worktree forks from a fresh upstream base; M8b (§17, proposed 2026-05-23) introduces `/ccx:loop --duet` so Claude and Codex alternate as implementer with each reviewing the other's turn, built on top of M8a's infra.
 
 ---
 
@@ -669,9 +672,220 @@ Listed here so the M8b implementer (T-2) does not re-debate them:
 
 ---
 
-## 17. M8b — Duet loop (deferred to T-2)
+## 17. M8b — Duet loop
 
-Reserved for T-2 to author per BOARD direction. Until then this slot is intentionally empty so the existing cross-references in §18 / §19 do not collide.
+Status: proposed 2026-05-23. SSOT for T-3 to implement against. Built on the M8a infra refresh (§16): every duet worker is liveness-checked through `claude agents --json` (§16.1) and forks its worktree from the supervisor's post-brief-commit local `HEAD` per §16.2 — which itself fast-forwards local `INTEGRATION` to `origin/<INTEGRATION>` once per run before the first dispatch, so workers benefit from a fresh upstream base without bypassing local task merges queued earlier in the same run. The per-task worker can then grow from "one Claude session" to "one Claude session whose internal driver alternates with a Codex subprocess" without re-introducing the PID-polling failure mode §16.1 fixed.
+
+### 17.1 Motivation
+
+The Codex CLI was installed for the review gate at the bottom of `/ccx:loop` (§4.2's `--chat` path eventually triggers a `/codex:review` call inside the worker) and for the `/codex:rescue` escape hatch. Two implementer capabilities sit idle:
+
+- **Implementer Codex is never invoked unless rescued.** `/codex:rescue` (`codex-companion.mjs task --write --json`) is the user-facing escape hatch when Claude is stuck. It is reactive — the human has to notice and trigger it — and it discards the loop state. The same primitive could be the duet's Codex implement turn, used proactively every cycle.
+- **Reviewer Claude is never invoked at all.** Codex reviews Claude's work each cycle; nothing reviews Codex's. When the worker is doing pure-Claude implementation, the reviewer is a fundamentally different model (good); when the worker is doing pure-Codex implementation under `/codex:rescue`, the reviewer (also Codex) shares the implementer's blind spots.
+
+M8b makes both directions the default operating mode of `/ccx:loop --duet`: Claude and Codex alternate as implementer, and each side reviews the other side's last implement turn. The hypothesis is that diverse-model alternation catches blind spots a single-model loop misses — the same intuition that motivates §15's M7 ladder (escalating to a stronger model when the current one is stuck) generalized to "escalate across model families on every turn." If the hypothesis is wrong in practice, the cost is twice the per-cycle wall-clock and roughly doubled token spend with no quality lift; `--duet` is opt-in (§17.3) so the cost is bounded to the runs that ask for it.
+
+### 17.2 Per-turn sequence and the alternation rule
+
+The happy-path sequence with Claude-lead (default) is a fixed **4-turn alternation** that repeats. "Alternation" is the unit used here for the round-trip Claude→Codex→Claude pattern; **"cycle" — used later in §17.9 — is reserved for the loop-budget unit (one implement + one review = two turns)**, the same unit non-duet `/ccx:loop` already uses. One alternation therefore equals two cycles. Keeping the two words distinct prevents `--loops 3` from being implemented as three 4-turn alternations (six implement + six review = twelve turns, double the intended budget):
+
+```
+       alternation k                            alternation k+1
+┌──────────────────────────────────────┐   ┌──────────────────────────
+│ T(4k+1)  Claude implement   ───┐    │   │ T(4k+5)  Claude implement
+│ T(4k+2)  Codex review     ◀───┘    │   │ T(4k+6)  Codex review
+│ T(4k+3)  Codex implement  ───┐    │   │ ...
+│ T(4k+4)  Claude review    ◀───┘    │
+└──────────────────────────────────────┘
+```
+
+Two rules govern advancement between turns:
+
+1. **On reviewer approve, the implementer role flips.** The other side runs next. After a Claude review approves Codex's implement, Claude implements next (cycle boundary); after a Codex review approves Claude's implement, Codex implements next (mid-cycle boundary). The empty implement turn that follows an approval is expected — see §17.4.
+2. **On reviewer reject, the same implementer re-runs.** The side that just heard the criticism keeps the implement turn to address it; the reviewer then re-reviews. This is the deliberate departure from strict alternation — having the rejecter implement their own fix would be diverse-model bug-fixing in theory but in practice asks Codex to re-engineer a passage it just criticised in Claude's voice, or vice versa, which compounds the style ping-pong that §17.6 already has to mitigate.
+
+The implementer who runs after a rejection is therefore deterministic from the last review outcome alone; the driver does not need an "interrupted alternation" state machine — it tracks `last_implementer` and `last_review_outcome` only.
+
+**Lead.** Default lead is Claude (the first implement turn is `Claude implement`). The `--codex-first` flag (§17.3) flips the lead so Codex's `codex-companion.mjs task` runs first and Claude's first turn is `Claude review`. Lead choice does not affect the convergence rule (§17.4) — both consecutive approvals still need to come from different reviewers.
+
+### 17.3 New `/ccx:loop` flags
+
+Two flags land on `/ccx:loop`; the supervisor (§4.2) learns to forward them to workers via a new brief frontmatter field. No new supervisor-level flags — `--duet` is a per-task decision (the same docs-only task should not flip between duet and non-duet across re-dispatches), so it lives at the brief level, not in `/ccx:supervisor`'s configuration surface.
+
+- **`--duet`** — enable duet mode. Without this flag `/ccx:loop` is unchanged (single-model Claude implementer, Codex reviewer). With it, the driver enters the alternating sequence described in §17.2.
+- **`--codex-first`** — flip lead to Codex. Only meaningful with `--duet`; the driver MUST reject the invocation with a precise error (`--codex-first requires --duet`) if it is passed without `--duet`. This matches T-3's queued argument-parsing contract; a silent no-op would let a user think duet was enabled when it was not, and a stray flag in a `/ccx:loop` invocation is a typo worth surfacing immediately.
+
+**Brief-driven supervisor forwarding.** The supervisor's dispatch prompt template (§7.1, mirrored in `plugins/ccx/commands/supervisor.md` §P2.2) currently hard-codes the first line as `/ccx:loop --loops <WORKER_LOOPS> --commit --chat`. M8b extends the brief frontmatter (§6.2) with an optional `loop_flags: [...]` list — strings appended verbatim to that first line at dispatch time. A duet task brief declares:
+
+```yaml
+---
+id: T-42
+title: "..."
+scope: { ... }
+depends_on: []
+loop_flags: ["--duet"]        # or ["--duet", "--codex-first"]
+---
+```
+
+Supervisor's P2.2 string-builder appends each entry to the first line: `/ccx:loop --loops 3 --commit --chat --duet`. Validation runs against the **whole token** (not just the flag name): each entry must match `^--[a-z][a-z0-9-]+$` exactly — no `=`, no whitespace, no value suffix. Both M8b allowlisted flags are boolean toggles, so the `=` form has no legitimate use; an entry like `--duet=foo bar` would parse as a single token whose name fragment is `--duet` but whose appended payload could inject arbitrary additional CLI tokens into the worker command line. Rejecting the whole-token shape closes that injection vector at parse time. Future allowlist additions that legitimately take values (e.g. a hypothetical `--codex-effort=<level>`) MUST be allowlisted with an explicit per-flag regex (e.g. `^--codex-effort=(none|minimal|low|medium|high|xhigh)$`) rather than relaxing this regex; the per-flag regex constrains both the name AND the value's grammar in one pattern.
+
+**Forwardable-flag allowlist** (the supervisor MUST reject `loop_flags` entries outside this set rather than forward them blindly — an over-permissive contract would let a brief override the supervisor-owned `--worktree`, `--loops`, `--commit`, or `--chat` flags from §4.2 and break M8a's cwd-based liveness lookup (§16.1) or duplicate the loop budget):
+
+| Flag             | Allowed token form (exact match) | Reason it is on the allowlist                                                                 |
+|------------------|----------------------------------|------------------------------------------------------------------------------------------------|
+| `--duet`         | `--duet` (boolean)               | M8b-owned implementer-loop mode toggle (§17.3).                                                |
+| `--codex-first`  | `--codex-first` (boolean)        | M8b-owned lead flip (§17.3); requires `--duet` per §17.3's argument-parse contract.            |
+
+Everything else — including `--worktree`, `--loops`, `--commit`, `--chat`, any value-form variant of an allowlisted boolean (e.g. `--duet=true`), and any non-duet `/ccx:loop` flag — is denied with a precise error at the supervisor's Step A step 2 brief-validation pass: `loop_flags[<n>] '<token>' is not on the supervisor's forwardable allowlist (M8b allows: --duet, --codex-first as boolean tokens). Edit .ccx/tasks/<id>.md to remove or correct it.` Tasks fail dispatch with `exit_status: "loop-flags-rejected"` and a notes string carrying the rejected entry; the run continues with other tasks. Adding a future flag to the allowlist is a deliberate per-milestone act, not a default-open behaviour — every new entry requires a design-doc amendment here and a corresponding supervisor.md / loop.md change so the flag's interaction with the supervisor's worktree / liveness / merge invariants is reasoned about explicitly.
+
+**BOARD schema and `/ccx:plan` stay unchanged per BOARD direction.** `loop_flags` lives only in brief frontmatter — never in `BOARD.md` rows, never in `/ccx:plan` output. The opt-in lifecycle:
+
+1. **First-dispatch opt-in: human pre-creates AND commits the brief.** For a task that wants duet on its first dispatch, the human authors `.ccx/tasks/T-<id>.md` on the integration branch by hand — copying the §6.2 6-H2-section template, frontmatter included, and setting `loop_flags: ["--duet"]` in the frontmatter — then commits the new brief file (`git add .ccx/tasks/T-<id>.md && git commit -m "supervisor: pre-seed T-<id> duet brief"`) before running `/ccx:supervisor`. The commit step is required because supervisor's P0 clean-tree pre-check (§P0 step 2) refuses to run with `git status --porcelain` non-empty; an uncommitted pre-seed brief would abort the run before Step A could observe it. Supervisor's Step A step 2 (brief write) gains a "**preserve-on-overwrite**" rule (T-3 amends `plugins/ccx/commands/supervisor.md` §P2.1 / §P2.A step 2 accordingly): if `.ccx/tasks/<id>.md` already exists with parseable frontmatter, the supervisor reads `loop_flags` from it, applies all other BOARD-derived fields normally, and emits the regenerated brief with `loop_flags` copied through. This is the only frontmatter field the rewrite preserves; all others (id, title, scope, depends_on, body H2 sections) are still BOARD-sourced as before, so a stale brief cannot mask a BOARD edit. **No-op commit handling:** when the regenerated brief byte-matches the pre-seeded committed file (no fields changed because all BOARD-sourced data already matched the pre-seed exactly), Step A's brief-only `git commit` would fail under the existing "no-op commit treated as failure" rule and abort the dispatch despite the duet opt-in being valid. T-3's supervisor.md amendment MUST therefore use this exact ordering — write, stage, then probe — so the cached-diff check actually observes the regenerated content:
+
+1. Write the regenerated brief to `.ccx/tasks/<id>.md` (overwrites the on-disk file).
+2. `git add -- .ccx/tasks/<id>.md` (stage the regenerated content; without this step the cached diff would be empty regardless of whether the file changed, because `git diff --cached` only sees the index).
+3. Run `git diff --cached --quiet -- .ccx/tasks/<id>.md`.
+4. Branch on exit code:
+   - **Zero exit (no staged diff, regeneration matched the committed pre-seed byte-for-byte)**: SKIP `git commit` and proceed to Step A step 3a, sourcing `BASE_REV = $(git rev-parse HEAD)` from the unchanged tip. The pre-seed commit already contains the brief content the worker needs.
+   - **Non-zero exit (changes staged)**: `git commit -m "supervisor: prepare <TASK.id> <TASK.title> — brief"` as before, then continue to Step A step 3a with the post-commit HEAD.
+
+The "write → stage → probe" order is load-bearing: a reading that probes before staging would always see an empty cached diff for the regenerated content and skip the commit even when BOARD-derived fields legitimately changed, leaving the worker forked from an old `HEAD` whose brief did not reflect the regeneration. The amendment keeps "every brief change lands as one commit" while not forcing an empty commit when nothing changed.
+2. **Re-dispatch preservation.** After §15's stuck or cycle-cap re-dispatch the supervisor rewrites the brief again; the same preserve-on-overwrite rule keeps `loop_flags` stable across attempts so a multi-attempt duet task stays duet through the whole ladder.
+3. **Post-first-dispatch opt-in (not recommended).** A task that started non-duet can be flipped mid-run by editing the on-disk brief between attempts: append `loop_flags: ["--duet"]` to the frontmatter, then let the next re-dispatch pick it up. Discouraged because it muddies the per-attempt audit trail (the same task brief shipped two different worker command lines across attempts); the cleaner path is to wait for the run to drain, then mark the task `pending` again with a hand-authored duet brief.
+4. **`/ccx:plan` (§14) stays unchanged.** It writes BOARD rows only, never briefs. A future `/ccx:plan --duet` that pre-stages a duet brief alongside its BOARD row is M9 polish (§17.11), not M8b scope.
+
+T-3 implements the preserve-on-overwrite rule in `plugins/ccx/commands/supervisor.md` and the brief-frontmatter line in this doc's §6.2; SSOT for both is this subsection.
+
+No `--codex-model` / `--codex-effort` knobs ship in M8b — see §17.5 for why Codex stays at its companion-default model and §17.11 for the M9 deferral.
+
+### 17.4 Convergence rule — counter increments and resets
+
+The driver maintains an integer `approval_counter`, initialized to 0 at the start of the run and updated on every review and implement turn:
+
+| Turn outcome                                | `approval_counter` action      |
+|---------------------------------------------|--------------------------------|
+| Review approves                              | `+= 1`; if `== 2`, terminate.  |
+| Review rejects                               | reset to 0.                    |
+| Implement with non-empty diff                | reset to 0.                    |
+| Implement with empty diff                    | preserved.                     |
+
+Termination requires **two consecutive approvals from different reviewers**, with no intervening reject and no intervening implement turn that introduced new code. Strict alternation (§17.2 rule 1) guarantees the two approvals come from different reviewers — after Codex review approves, the next review is Claude's, and vice versa.
+
+**Why the empty-implement turn is preserved.** When Codex review approves at turn T, the driver runs Codex implement at T+1 anyway (rather than skipping straight to Claude review at T+2) so Codex sees the approved state and explicitly produces no changes — its empty diff is the audit trail that Codex agrees with its own approval. Skipping the turn would save one model call but lose the symmetry that makes the convergence rule diagram-able; the saving is not worth the asymmetry. Implementer prompts (§17.6) are explicit about this: "if the previous review approved, return without edits."
+
+**Empty-diff detection.** The driver compares **pre-turn vs post-turn worktree state**, not worktree vs HEAD. After the first non-empty implement turn, any cycle-level `git diff --quiet` against `HEAD` would still see the accumulated task diff regardless of whether the current turn added anything — and would reset `approval_counter` on every post-approval empty turn, making the §17.10(a) happy path impossible to reach. The contract is therefore: just before spawning the implement turn, the driver snapshots the worktree+index state (concrete options: `git write-tree` after `git add --intent-to-add` of untracked paths, or a stable hash of `git status --porcelain` ∪ `git diff` ∪ `git diff --cached` outputs; T-3 picks the cheapest one the worker's environment supports). It snapshots again after the turn completes. Equal snapshots → empty diff for this turn; the implementer added nothing on top of the prior state and the counter is preserved. Unequal snapshots → non-empty diff and the counter resets per §17.4. Whitespace-only and comment-only edits between snapshots count as non-empty by design — a "clean up while I'm here" reformat that resets the counter is precisely what §17.6's style ping-pong mitigation aims to prevent at the prompt level; the snapshot equality check is the runtime backstop.
+
+### 17.5 M7 ladder scope — Claude-only for M8b
+
+M8b applies §15's 5-rung model+effort ladder to the **Claude side only**. Codex stays at the companion's runtime default model and default effort for every turn it runs in M8b — neither is named in this doc on purpose (see below). Concretely:
+
+- Each Claude implement and Claude review turn is spawned at the rung the supervisor has the task on (via `--model <alias> --effort <level>`), inheriting M7's automatic-escalation behaviour: a `stuck` exit on the Claude side bumps the ladder, a `cycle-cap` exit retries the same rung. The Codex turns that interleave between Claude turns do not influence the rung — the supervisor's escalation logic reads only the `chat_close` status the **worker** emits at end-of-run (§17.9), and the worker emits one status for the whole duet, not per-side.
+- The `codex-companion.mjs task` invocation passes no `--model` / `--effort`, matching how `/codex:rescue` invokes it today (rescue.md leaves both unset unless the user opts in explicitly). The default model and effort resolve inside the companion at runtime against the local Codex install; if a future Codex CLI bump renames its default, no design-doc change is needed.
+
+The decision to hold Codex at its default is two-fold: (a) M7's tier ladder is calibrated against Claude's `--effort` levels which do not map cleanly onto Codex's `none|minimal|low|medium|high|xhigh` scale; (b) the supervisor's per-task budget (`--max-attempts`) is sized for one ladder, and pinning both sides to their own ladders multiplies the search space without a clear escalation signal to drive it. M9 may revisit (§17.11).
+
+### 17.6 Style ping-pong mitigation — prompt-only
+
+When two different models alternate as implementer on the same file, the natural failure mode is a style war: Claude renames a variable, Codex renames it back, Claude reformats a block, Codex re-reformats it differently. Each side's edits look like noise to the other's reviewer and reset the convergence counter (§17.4) every cycle.
+
+M8b mitigates this purely at the prompt level. Each implementer turn's system / user prompt is extended with a fixed clause appended verbatim:
+
+> When a previous implementer turn already touched this task, preserve that turn's file structure, naming, and code style. Limit your edits to the specific issue the latest review surfaced (or the missing piece this turn is responsible for). Do not reformat, refactor, or rename unrelated code. If the previous review approved and you have nothing substantive to add, return without edits — an empty diff is the correct response, not a flaw.
+
+This clause attaches to both Claude and Codex implement prompts at every turn including the first. The first-turn redundancy ("when a previous implementer turn …" → there is none) is deliberate: producing the prompt by string concatenation rather than branching keeps the implementer-spawn primitive identical across turns, which matters because the same primitive runs inside both the `Agent`-spawned Claude implementer (§17.7) and the `codex-companion.mjs task --write --json` Codex implementer (§17.8).
+
+No format pass. An earlier draft considered a "normalize with prettier / ruff before each review turn" step to eliminate format diffs entirely; rejected because (a) the project may not have a formatter configured, (b) running a formatter the worker did not author injects diffs the next implementer's reviewer would flag as unattributed, and (c) the prompt-only mitigation is reversible at zero cost if it does not hold up. Revisit if ping-pong is observed in practice.
+
+### 17.7 Claude review primitive — sub-Claude `Agent` spawn with the `code-review` skill
+
+**Decision: option (a) — sub-Claude `Agent` spawn invoking the existing `code-review` skill, with a fixed structured-output appendix.** The driver spawns an Agent (claude-type subagent) on each Claude-review turn, instructing it to run the user-installed `code-review` skill against the current worktree diff and emit a JSON envelope as the final line of its response.
+
+The two candidates from the brief:
+
+| Axis                              | (a) `Agent` + `code-review` skill                                | (b) `claude -p` subprocess with inline reviewer prompt          |
+|-----------------------------------|------------------------------------------------------------------|------------------------------------------------------------------|
+| Invocation cost                   | Shares the worker's plugin/skill cache, MCP connections, permission state; one `Agent` tool call. | Cold-start Claude process per turn; new MCP handshake, new permission negotiation, new log file. |
+| Structured-output cleanliness     | Skill output is prose; structured envelope must be appended via prompt convention ("end with `<verdict>...</verdict>` block"). | Total control over output schema; can mirror Codex review's JSON shape exactly. |
+| Approve/reject signal back to the driver | Driver parses Agent's reply text for the envelope; mismatched envelope = treat as reject and reset counter. | Same parse step, just on subprocess stdout instead of Agent reply. |
+| Fit with chat_close status taxonomy | None — the duet driver emits the existing `approved` / `filtered-clean` / `stuck` / `budget-exhausted` / `aborted` / `error` exits regardless of which review primitive ran. | Same. Both primitives are internal to the duet driver; neither extends the worker-facing status enum. |
+| Re-implementation surface         | Reuses an installed skill that is already the canonical "Claude reviews current diff" path. | Re-implements review prompt inline inside `/ccx:loop`'s duet driver, diverging from any future evolution of the `code-review` skill. |
+
+Option (a) wins on invocation cost (no subprocess cold-start per turn — the duet runs ≥4 review turns per cycle and that overhead adds up over a `--loops 3` run), and on re-implementation surface (the `code-review` skill is the SSOT for "Claude reviews the current diff"; forking an inline copy is exactly the kind of drift that bit the supervisor when `/code-review --comment` got listed as a separate M8a backlog item in §16.3). Option (b)'s sole edge — structured-output cleanliness — is closeable by prompt convention: the driver's Agent prompt appends `Your final response MUST end with a fenced JSON block: \`\`\`json\n{"verdict": "approve"|"needs-attention", "findings": [...]}\n\`\`\``, and the driver parses that final block. Malformed or missing envelope is treated as `needs-attention` with one synthetic finding `("review-output-malformed", "<first 200 chars of reply>")` so the counter resets and the next implement turn surfaces the issue.
+
+The driver passes the skill the same arguments `--min-severity` / `--min-confidence` that `/ccx:loop` already accepts (forwarded as Agent prompt instructions, not as skill flags — the `code-review` skill's flag surface is the skill's contract, not the duet driver's). Findings flow through `/ccx:loop`'s existing stuck-finding detector (§17.9) by `(file, title, body)` key.
+
+### 17.8 Codex implement primitive — `codex-companion.mjs task --write --json`
+
+Reuse `/codex:rescue`'s implementation path verbatim: each Codex implement turn invokes
+
+```
+node "${CODEX_ROOT}/scripts/codex-companion.mjs" task --write --json [prompt]
+```
+
+— the same one-line invocation the `codex:codex-rescue` subagent uses (see `rescue.md` operating rules). `--write` lets Codex edit files in place; `--json` returns a parseable result envelope; no `--model` / `--effort` per §17.5. The prompt the driver builds for each Codex implement turn is the task brief excerpt plus the latest review's findings plus the §17.6 style clause — exactly the same prompt shape as the Claude implementer would get, just routed to the Codex CLI.
+
+`CODEX_ROOT` resolves with the same `find ~/.claude/plugins/marketplaces/openai-codex/plugins/codex ~/.claude/plugins/cache/openai-codex/codex -maxdepth 0 -type d 2>/dev/null | head -1` snippet `/ccx:loop` Phase 2 already uses for `/codex:review`. The first Codex turn that fails (binary missing, non-zero exit, malformed JSON, or `CODEX_ROOT` empty) STOPS the worker with `chat_close({status: "error"})` — the duet cannot proceed half-way, and falling back to single-model Claude mid-run would silently violate the user's `--duet` opt-in. The worker log captures the verbatim companion stderr so the supervisor's block-handler (§9) can surface it.
+
+### 17.9 Worker exit signal taxonomy under duet
+
+The duet runs inside one `/ccx:loop` worker session and emits one `chat_close` status at end-of-run; the existing taxonomy (`approved | filtered-clean | stuck | budget-exhausted | aborted | error`) carries over unchanged with the following per-status semantics adjusted for duet:
+
+- **`approved`** — convergence rule (§17.4) fired: two consecutive review approvals from different reviewers. This is the dominant happy-path exit under `--duet`.
+- **`filtered-clean`** — the convergence rule did not strictly fire but both reviewers' remaining findings all fell below `--min-severity` / `--min-confidence`. Mirrors `/ccx:loop`'s existing semantics (loop.md Step D rule 2).
+- **`stuck`** — a single `(file, title, body)` finding key appeared in **three consecutive review turns** (from either reviewer, counted across both sides — the streak is a property of the finding, not of the reviewer who raised it). Duet does not double the stuck threshold because the failure mode is the same: the implementer cannot satisfy the criticism after two prior fix attempts; the third repeat justifies escalation. **Recovery asymmetry under M8b's Claude-only M7 ladder (§17.5):** the driver records which side's most-recent non-empty implement turn preceded the stuck streak — Claude-side or Codex-side — and surfaces that hint by writing one line to the worker's log file (`.ccx/workers/T-<id>.log`) **immediately before** calling `chat_close`, formatted exactly as `M8B_STUCK_SIDE: claude` or `M8B_STUCK_SIDE: codex` (one literal line, no trailing punctuation). The supervisor's §P2.5 stuck classifier — which already opens `meta.log_path` for triage — tails the last ~20 log lines on every `stuck` closure and scans for that token; presence → record `stuck_side` in `LAST_SIGNAL_ON_BLOCK`'s metadata alongside the existing signal value, absence → treat as `stuck_side=unknown` (a non-duet worker, or an old log). The chat broker's `chat_close` tool surface and recent-closures ring (`{sessionId,cwd,branch,label,status,at}`) stay unchanged — log-tail is the existing channel for worker-internal state the supervisor needs at block time, used by every block-handler since M5's `stuck-recovery-failed` notes path. Supervisor's §15 ladder bump still fires on every `stuck` exit, but only meaningfully escalates Claude-side stuck (a stronger Claude rung produces different code on Claude's implement turns). A **Codex-side stuck** would re-run with the same Codex default and most likely repeat the same `stuck` exit until `--max-attempts` is exhausted — explicitly an M8b limitation, tracked in §17.11 for M9 follow-up where the Codex side gets a ladder of its own or a separate `stuck-codex` block path. Until then, the human who sees a `stuck_side=codex` annotation in supervisor's Discord lifecycle event (§18.3) should disable duet for that task and re-dispatch single-implementer rather than re-trying duet.
+- **`budget-exhausted`** — one **duet cycle** equals one implement+review turn-pair (two turns total); `--loops N` caps the worker at N such cycles. This matches the non-duet semantics where "one cycle = one impl + one review" — duet does not redefine the unit, it just alternates which side runs which turn. `--loops 3` therefore allows 3 impl + 3 review turns total (mixed Claude / Codex), not 3 full 4-turn alternations. Supervisor's §15 ladder treats this exit as `cycle-cap` (same-tier retry). **Minimum `--loops` under `--duet`:** because §17.4's convergence rule requires two consecutive approvals from different reviewers (≥3 review turns in the worst case where the first review approves and one empty implement turn intervenes), `--duet --loops 1` cannot possibly converge to `approved`. The duet driver MUST therefore reject `--duet` with `--loops < 2` at argument-parse time with `--duet requires --loops >= 2 (convergence needs two reviewer approvals from different reviewers)`. T-3's arg-parse contract picks this up alongside the `--codex-first` validation in §17.3.
+- **`aborted`** / **`error`** — unchanged. `aborted` covers cancellation (loop.md cancellation semantics); `error` covers Codex companion crash (§17.8), Agent spawn failure (§17.7), or any uncaught exception in the duet driver.
+
+No new worker-emitted `chat_close` status values — the implement/review primitive sequence is worker-internal and the supervisor sees the same six statuses it has handled since M5. **One supervisor-side block reason is added by M8b:** `loop-flags-rejected` (§17.3 brief-validation pass — task never gets dispatched because the brief carried an invalid `loop_flags` entry). T-3 amends supervisor.md §P3's blocked-reasons enumeration and §P0.5 step 7 rule 5's classifier mapping (`loop-flags-rejected` is a `completed`-classified session exit since the rejection is deterministic and bounded, not a stuck-flavored loop) so the new reason flows through the existing report / lifecycle / Discord paths without ad-hoc handling at each site.
+
+### 17.10 Worked examples
+
+All examples assume Claude-lead (default), `--loops 3`, `--min-severity low`, and start the run with `approval_counter = 0`. Each row is one turn. "Diff" describes the implement turn's outcome; "Counter" is the post-turn `approval_counter` value.
+
+**(a) Clean 2-cycle approval — the happy path.**
+
+| Turn | Side | Phase     | Outcome                                      | Diff       | Counter | Action                              |
+|------|------|-----------|----------------------------------------------|------------|--------:|--------------------------------------|
+| T1   | C    | implement | initial implementation                       | non-empty  |       0 | proceed                              |
+| T2   | X    | review    | approve                                      | —          |       1 | proceed (flip → Codex implements)    |
+| T3   | X    | implement | nothing to add post-approval                 | empty      |       1 | proceed (empty diff preserves counter) |
+| T4   | C    | review    | approve                                      | —          |       2 | **terminate — `chat_close: "approved"`** |
+
+Four turns total. Both reviewers approved consecutively; the empty Codex implement turn between them did not reset the counter.
+
+**(b) Codex rejects, fix turn, then both reviewers approve.**
+
+| Turn | Side | Phase     | Outcome                                                                  | Diff      | Counter | Action                                                   |
+|------|------|-----------|--------------------------------------------------------------------------|-----------|--------:|----------------------------------------------------------|
+| T1   | C    | implement | initial implementation                                                   | non-empty |       0 | proceed                                                  |
+| T2   | X    | review    | reject — flags a missing edge case                                       | —         |       0 | proceed (reject keeps Claude as implementer per §17.2)   |
+| T3   | C    | implement | Claude addresses Codex's feedback                                        | non-empty |       0 | proceed                                                  |
+| T4   | X    | review    | re-review, approve                                                       | —         |       1 | proceed (flip → Codex implements)                        |
+| T5   | X    | implement | nothing to add post-approval                                             | empty     |       1 | proceed (empty preserves counter)                        |
+| T6   | C    | review    | approve                                                                  | —         |       2 | **terminate — `chat_close: "approved"`**                  |
+
+Six turns. The reject at T2 kept Claude on the implementer turn at T3 (§17.2 rule 2); the subsequent two consecutive approvals (T4 = Codex, T6 = Claude with empty Codex implement between) satisfied convergence. This is the trace the brief example (b) describes.
+
+**(c) M7 ladder escalation on a stuck Claude implementer turn.**
+
+Start tier `sonnet`, `--max-attempts 4`. A docs-misalignment finding survives two fix attempts on Claude's side; Codex's reviewer keeps flagging it:
+
+| Attempt | Tier             | Turn trace (abridged)                                                      | Stuck-finding streak | Worker exit  | Supervisor next action               |
+|---------|------------------|----------------------------------------------------------------------------|----------------------|--------------|---------------------------------------|
+| 1       | sonnet/medium    | C-impl₁ → X-rev reject (finding F₁) → C-impl₂ → X-rev reject (F₁) → C-impl₃ → X-rev reject (F₁) | 3                    | `stuck`      | bump → opus/high; re-dispatch         |
+| 2       | opus/high        | C-impl₁ → X-rev approve → X-impl (empty) → C-rev approve                   | —                    | `approved`   | merge                                  |
+
+The Claude side benefits from the tier bump; Codex stays at its default model across both attempts per §17.5. The supervisor's escalation decision reads only the worker's `chat_close` status — it does not see which side raised the stuck finding, and it does not need to: M7's premise is that a stronger model on the failing side resolves the deadlock, and only Claude has a ladder to climb.
+
+### 17.11 Out of scope for M8b
+
+Deliberately deferred to M9 so the M8b scope stays implementer-loop-only:
+
+- **`--codex-model` / `--codex-effort` runtime knobs.** Same shape as M7's `--start-tier`, but for the Codex side. Out of scope per §17.5; revisit once duet has shipped and there is evidence the default Codex model is the failing axis on some class of task.
+- **Per-task `model_profile` in BOARD.** A BOARD row that pre-declares duet on / off, lead side, and per-side tier hints. Couples to `/ccx:plan` and the BOARD schema; deferred jointly with M7's identical out-of-scope item (§15.6).
+- **Format pass.** A prettier / ruff normalization step interleaved between turns. Rejected for M8b per §17.6; revives only if prompt-only ping-pong mitigation visibly fails.
+- **Multi-implementer concurrency within a single cycle.** Running Claude implement and Codex implement in parallel and merging diffs. Touches scope-overlap detection (§9) and the worker's working-tree model in a way that has no design precedent; deferred indefinitely.
+- **Codex-side stuck recovery via M7-style ladder.** Codex stays at default; no Codex-side rung to bump. §17.9's `stuck-side=codex` block reason is the human-visible signal that the current `stuck` exit will not benefit from automatic re-dispatch — M9 picks up either a Codex-side tier ladder (paired with the deferred `--codex-model` / `--codex-effort` knobs) or a distinct `stuck-codex` supervisor block path that skips the M7 retry entirely and escalates to the human on first occurrence.
 
 ---
 
