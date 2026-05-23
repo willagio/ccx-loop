@@ -4,7 +4,7 @@ argument-hint: "[--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-
 allowed-tools: Bash, BashOutput, Read, Write, Edit, Glob, Grep, AskUserQuestion, TaskCreate, TaskUpdate, mcp__ccx-chat__chat_register, mcp__ccx-chat__chat_send, mcp__ccx-chat__chat_set_phase, mcp__ccx-chat__chat_close, mcp__ccx-chat__chat_supervisor_poll, mcp__ccx-chat__chat_supervisor_reply, mcp__ccx-chat__chat_supervisor_escalate, mcp__ccx-chat__chat_supervisor_close, mcp__ccx-chat__chat_supervisor_recent_closures
 ---
 
-# /ccx:supervisor — Parallel Worker Orchestrator (M7)
+# /ccx:supervisor — Parallel Worker Orchestrator (M7 + M8a infra refresh)
 
 One human drives N parallel `/ccx:loop` workers from a shared `BOARD.md`. Each task runs in its own git worktree, gets its own brief file, and merges back into the integration branch on approval. Worker `chat_ask` calls are intercepted by the broker; the supervisor session answers from the brief / BOARD / merge history when possible, escalating to Discord only when no deterministic answer fits. Tasks whose scope globs touch overlapping files are serialized at dispatch time so concurrent worktrees do not produce conflicting merges, and every merge is staged via a `git merge --squash` dry-run before being finalized as a single supervisor-authored `T-<id>: <title>` commit. When a worker exits without approval, the supervisor automatically re-dispatches the task at a new tier on the fixed 5-rung model ladder — `stuck` bumps one rung, `cycle-cap` (aka `budget-exhausted`) retries the same rung — until either the task merges or the per-task `--max-attempts` budget runs out on the automatic paths. A `stuck` exit at the top of the ladder (`opus/max`) is the only remaining human gate, prompting via the M5 `AskUserQuestion` path; that single branch is exempt from the `--max-attempts` budget (per-event, not latching) so the advertised top-of-ladder human recovery stays reachable under the default configuration while every automatic loop — including cycle-cap retries that may follow a human-directed re-dispatch — remains bounded.
 
@@ -17,9 +17,10 @@ Raw arguments: `$ARGUMENTS`
 - **M3 — autonomous answering.** `/ccx:supervisor` polls the broker's supervisor queue every scheduling iteration. For each pending ask it consults the task brief's `## Decisions` table, BOARD `## Direction`, and the integration branch's merge-commit history. A confident deterministic match → `chat_supervisor_reply`; otherwise → `chat_supervisor_escalate` (human answers on Discord). Every supervisor decision is appended as JSONL to `.ccx/supervisor-audit/<SUPERVISOR_RUN_ID>.jsonl` so the human can audit after the fact.
 - **M4 — scope-overlap gate + pre-merge dry-run.** Step A defers any pending task whose `scope.include` matches a tracked file already claimed by a `RUNNING` task — overlap is computed by intersecting the two `git ls-files -- <pathspecs>` results plus a literal-glob equality fallback for globs that match no current files. Deferred tasks stay in `PENDING_POOL` and are retried next iteration when slots free; nothing is marked `blocked`. Step B's merge stages the integration branch via `git merge --squash --no-edit` (pre-M6 §15.1 — originally `git merge --no-commit --no-ff --no-edit`), inspects unmerged paths via `git ls-files -u`, and either finalizes with a supervisor-authored `T-<id>: <title>` commit (clean) or rolls back via `git restore --staged --worktree .` (conflict) — separating conflict detection from commit creation.
 - **M5 — stuck-exit auto-revise + re-dispatch.** Worker `chat_close({status: "stuck"})` became recoverable in bounded cases. The broker records every `chat_close` status in an in-memory ring buffer (`chat_supervisor_recent_closures` MCP tool); Step B queries it after a `no-commit` classification to peel off stuck exits from the broader cap-hit / filtered-clean / aborted bucket. In M5 the first stuck exit per task prompted the human via `AskUserQuestion`; M7 subsumes that behaviour for all but the terminal `opus/max` rung (see below). See §P2.5.
-- **M7 — model tier escalation (this milestone).** Every `claude -p` worker spawn now includes `--model <alias>` and `--effort <level>` drawn from the rung the supervisor currently has the task on. The ladder is fixed at five rungs — `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)` — and three new supervisor flags (`--max-attempts N`, `--worker-loops N`, `--start-tier <alias>`) expose the knobs. On worker exit without approval the supervisor reads the `chat_close` status: `stuck` bumps the tier one rung and re-dispatches automatically (no human prompt), `cycle-cap` (the M7 label for `/ccx:loop`'s `budget-exhausted`) retries at the same rung, and both increment the BOARD `attempts` counter. At `opus/max`, stuck falls through to the pre-existing M5 human-guidance `AskUserQuestion` path ("ladder exhausted") — this branch is exempt from `--max-attempts` so the advertised top-of-ladder recovery stays reachable under the default budget; cycle-cap keeps same-rung retrying until `attempts >= --max-attempts`, then blocks with `attempts-exhausted`. `STUCK_REDISPATCH_CAP` from M5 is superseded by `--max-attempts`. BOARD schema and `/ccx:plan` are unchanged — M7 is a supervisor + docs change only. See §P2.5 and `docs/supervisor-design.md` §15.
+- **M7 — model tier escalation.** Every `claude -p` worker spawn now includes `--model <alias>` and `--effort <level>` drawn from the rung the supervisor currently has the task on. The ladder is fixed at five rungs — `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)` — and three new supervisor flags (`--max-attempts N`, `--worker-loops N`, `--start-tier <alias>`) expose the knobs. On worker exit without approval the supervisor reads the `chat_close` status: `stuck` bumps the tier one rung and re-dispatches automatically (no human prompt), `cycle-cap` (the M7 label for `/ccx:loop`'s `budget-exhausted`) retries at the same rung, and both increment the BOARD `attempts` counter. At `opus/max`, stuck falls through to the pre-existing M5 human-guidance `AskUserQuestion` path ("ladder exhausted") — this branch is exempt from `--max-attempts` so the advertised top-of-ladder recovery stays reachable under the default budget; cycle-cap keeps same-rung retrying until `attempts >= --max-attempts`, then blocks with `attempts-exhausted`. `STUCK_REDISPATCH_CAP` from M5 is superseded by `--max-attempts`. BOARD schema and `/ccx:plan` are unchanged — M7 is a supervisor + docs change only. See §P2.5 and `docs/supervisor-design.md` §15.
+- **M8a — supervisor infra refresh (this milestone).** Two narrow infra changes that unblock M8b's duet loop: (1) worker exit detection moves from `BashOutput`-on-`shell_id` PID-style polling to `claude agents --json` registry lookup (matched by `cwd == meta.worktree_path`) — see Step B's preamble and step 1; (2) Phase P0 step 3a best-effort fast-forwards local integration to its `origin/<INTEGRATION>` tip so every worker worktree forks from a fresh upstream base. Both have documented fallbacks (legacy `BashOutput`, local HEAD) so older Claude Code versions and purely-local repos degrade cleanly. See `docs/supervisor-design.md` §16.
 
-Still deferred (out of scope for M7):
+Still deferred (out of scope for M7/M8a):
 
 - `--start-effort` override and per-task BOARD `model_profile` field — deferred to M8 (see `docs/supervisor-design.md` §15.6).
 - Supervisor-session resume after close (stretch).
@@ -53,7 +54,7 @@ No free-form task description — the supervisor drives entirely from `BOARD.md`
 
 ## Guardrails
 
-- The supervisor MUST NOT push, force-push, amend published commits, `git reset --hard`, or `git branch -D` anything.
+- The supervisor MUST NOT push, force-push, amend published commits, or `git reset --hard` anything. `git branch -D` is permitted ONLY for supervisor-owned worker branches matching the pattern `ccx/<task_id>` (cleanup paths in Step A step 5's spawn-error handler and §P2.5 step 5's stuck/cycle-cap recovery teardown) — any other branch deletion is forbidden. This narrows the previous blanket ban so that M8a's pre-created worktree cleanup can complete without leaving stale `ccx/<task_id>` refs that would trip Step A step 1b's stale-artifact gate on the next run.
 - Every `claude -p` worker spawn MUST use `Bash(run_in_background=true)` so the supervisor keeps control. Synchronous spawns would block the whole scheduling loop.
 - Worker log files land at `.ccx/workers/<TASK_ID>.log`; the directory MUST exist before any spawn.
 - The supervisor MUST NOT mark a task `merged` in `BOARD.md` without first verifying the merge actually moved `HEAD` on the integration branch (`git rev-parse HEAD` changed).
@@ -72,6 +73,12 @@ No free-form task description — the supervisor drives entirely from `BOARD.md`
    - Otherwise `INTEGRATION="$(git rev-parse --abbrev-ref HEAD)"`. If the result is `HEAD` (detached), STOP — tell the user to check out a branch first.
 2a. **Integration branch must be the current checkout.** Compute `CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"`. If `CURRENT_BRANCH != INTEGRATION`, STOP with: `supervisor must be run while checked out on the integration branch — run 'git checkout <INTEGRATION>' first`. Rationale: every subsequent `git add`/`git commit`/`git merge` operates on the current `HEAD`, and worker worktrees fork from that `HEAD` too. If supervisor ran from a different branch, briefs and merges would land on the wrong branch and workers would fork from stale commits. Auto-checkout is avoided in M1 because it would require crash-safe restore on failure; forcing an explicit checkout gates the risk clearly.
 3. Verify the working tree is clean on the current checkout: `git status --porcelain=v1 -z` must be empty. If dirty, STOP. Unlike `/ccx:loop`, supervisor commits land directly on the integration branch; pre-existing uncommitted changes would contaminate the dispatch/batch commits. Tell the user to stash or commit first and re-run.
+3a. **M8a — fresh-base refresh (`worktree.baseRef: "fresh"`).** Best-effort fast-forward of local `INTEGRATION` to its `origin/<INTEGRATION>` tip so that every worker worktree created later in Step A step 3a forks from an up-to-date base rather than a stale local HEAD. Runs ONCE per supervisor run, at P0 only:
+   - `git fetch --quiet origin "<INTEGRATION>:refs/remotes/origin/<INTEGRATION>" 2>/dev/null || true`. The explicit `<branch>:refs/remotes/origin/<branch>` refspec is load-bearing — without it `git fetch origin <branch>` lands only in `FETCH_HEAD` and leaves `refs/remotes/origin/<INTEGRATION>` stale, so the subsequent `git merge --ff-only refs/remotes/origin/<INTEGRATION>` would replay the OLD remote tip. The trailing `|| true` covers no-origin-remote and offline cases — `else local HEAD` is the brief's documented fallback and not a hard error.
+   - If `git rev-parse --verify "refs/remotes/origin/<INTEGRATION>" >/dev/null 2>&1` resolves, attempt `git merge --ff-only "refs/remotes/origin/<INTEGRATION>"`. On success, local `INTEGRATION` silently advances to the upstream tip. On failure (local is ahead of origin from a prior run, or has diverged) log one line — `M8a: integration branch is ahead of origin/<INTEGRATION> or diverged — continuing with local HEAD as worker base ref` — and continue. Do NOT attempt non-FF merge, rebase, or hard reset; rewriting local history under a supervisor that is about to commit briefs to the current HEAD would corrupt every subsequent dispatch.
+   - If `refs/remotes/origin/<INTEGRATION>` does not resolve (purely-local repo, never pushed, upstream renamed): skip silently. The documented `else local HEAD` fallback applies.
+
+   The refresh is once-per-run, not per-dispatch. Per-dispatch worktree creation (Step A step 3a) always forks from the supervisor's current `HEAD` — which equals whatever this P0 step landed on plus any brief commits already made this run. That preserves the Step B step 2 / step 3 invariant that worker branches diff cleanly against the merge target. Per-dispatch upstream refresh is deferred to a later milestone if measurement shows origin advancement during a run is a real pain point.
 4. Verify `REPO_ROOT/BOARD.md` exists. If missing, STOP with: `BOARD.md not found. Run /ccx:plan "<prompt>" or /ccx:plan --from <path> to seed tasks.` — `/ccx:plan` is the M6 onboarding path (see §14 of `docs/supervisor-design.md`); supervisor does NOT auto-invoke it, because auto-invocation would conflate LLM creativity (decomposition) with deterministic scheduling and hide the human review gate (`status: draft` in planned rows).
 5. Create (do NOT fail if present):
    - `REPO_ROOT/.ccx/tasks/`
@@ -206,30 +213,36 @@ A2. **Skip A2 entirely when `STOP_DISPATCHING == true`** — no slot-fill, no ov
    git rev-parse --verify "refs/heads/ccx/<TASK.id>" 2>/dev/null   # expect non-zero
    test -e "<REPO_ROOT>-<TASK.id>"                                 # expect non-zero
    ```
-   If either check passes (the ref or path exists), this is a stale artifact from a prior failed run. `/ccx:loop --worktree=<NAME>` responds by appending a random suffix to the branch name (see loop.md Phase 0.5 step 4); if that happens, the worker will commit on `ccx/<TASK.id>-<suffix>` while Step B polls `ccx/<TASK.id>` and misclassifies a successful run as `no-commit`. Do NOT let the worker pick its own suffix. Instead:
+   If either check passes (the ref or path exists), this is a stale artifact from a prior failed run. M8a moved worktree creation into the supervisor (step 1c below) so the worker no longer auto-suffixes branch names; supervisor must NOT let `git worktree add` proceed against an existing branch or path because step 1c would then fail with `fatal: 'ccx/<id>' is already checked out` and abort mid-dispatch. Instead:
    - Record an in-memory BOARD update: `status: "blocked"`, `exit_status: "stale-artifact"`, `notes: "existing branch ccx/<TASK.id> or worktree <path> from prior run — delete with 'git branch -d ccx/<TASK.id>' and 'git worktree remove <path>' then re-run supervisor"`.
    - Append `<TASK.id>` to `BLOCKED_IDS` (step D persists it).
    - **Remove `<TASK.id>` from `PENDING_POOL`** per the pool-removal rule — without this, the next A1 recompute would re-include this task (because the in-memory BOARD status hasn't been persisted yet) and the same stale-artifact handler would fire on every pass indefinitely.
    - Continue the outer slot-fill loop (this slot becomes free for the next ready task).
 2. **Write the brief** at `REPO_ROOT/.ccx/tasks/<TASK.id>.md` using the template in §P2.1. Frontmatter fields come from the BOARD row; body placeholders reference `DIRECTION_TEXT` and any `TASK.notes`.
-3. **Commit the brief alone** on the integration branch (so the worker's worktree, which forks from the latest `HEAD`, contains the file for the 4KB-escape-hatch variant of the dispatch prompt):
+3. **Commit the brief alone** on the integration branch (so the worker worktree, which forks from the current `HEAD` in step 3a below, contains the file for the 4KB-escape-hatch variant of the dispatch prompt):
    - `git add -- .ccx/tasks/<TASK.id>.md`
    - `git commit -m "supervisor: prepare <TASK.id> <TASK.title> — brief"`
    - If the commit fails (pre-commit hook, etc.), STOP the whole run and report — the brief file stays on disk but uncommitted; the task stays `pending`.
+3a. **M8a — pre-create the worker worktree (supervisor owns this now, not `/ccx:loop --worktree`).** Forks from the supervisor's current `HEAD` — which equals `INTEGRATION` after step 3's brief commit, AND is the same ref Step B's squash merge will eventually target. Forking from the merge target is mandatory: if the worktree forked from `origin/<INTEGRATION>` instead and local `INTEGRATION` had diverged (prior task merges this run, local-only commits), the `git log "<INTEGRATION>..ccx/<TASK.id>"` diff in Step B step 2 would include any upstream-only commits as if they were worker work, and the squash in step 3 would replay them into the `T-<id>: <title>` commit — silently inflating audit history and risking false conflicts. The P0 fetch + ff-only handles the "stale local" failure mode at run start (see P0 step 3a); per-dispatch the supervisor always forks from its own HEAD, the brief's documented `else local HEAD` path. See `docs/supervisor-design.md` §16:
+   - `BASE_REV = $(git rev-parse HEAD)` — captures the post-brief-commit HEAD; this becomes the worker branch's fork point AND the merge base Step B uses.
+   - `WORKTREE_ERR="$(git worktree add -b "ccx/<TASK.id>" "<REPO_ROOT>-<TASK.id>" "<BASE_REV>" 2>&1 1>/dev/null)"; WORKTREE_RC=$?`. The `2>&1 1>/dev/null` form captures stderr into the shell variable while discarding stdout — NEVER redirect to a file inside `REPO_ROOT` (e.g. `2>worktree.err`), because the redirection creates the file before `git worktree add` runs, leaving an untracked path in the integration checkout that Step B step 3's `git status --porcelain` cleanliness assert would then classify as a dirty tree and abort every approved-worker merge in the run. On `WORKTREE_RC != 0` (disk full, permission denied, race), treat as a non-fatal per-task error: record `exit_status: "stale-artifact"` with `notes: "git worktree add failed: <first 200 chars of WORKTREE_ERR>"`, append to `BLOCKED_IDS`, remove from `PENDING_POOL`, and continue the outer slot-fill loop. Do NOT STOP the whole run.
+   - Spawning workers from inside this worktree (step 4) is what makes Step B step 1's `claude agents --json` cwd lookup correct — the OS process cwd reported in the registry equals `meta.worktree_path`, the join key.
 4. **Capture `STARTED_AT` BEFORE spawning.** Record `STARTED_AT = <UTC now ISO 8601>` immediately, before the Bash spawn call below. Steps 6 and 7 MUST both use this same `STARTED_AT` value — not a re-sampled "now" timestamp. Rationale: §P2.5's stuck classifier requires `closure.at >= meta.started_at` to distinguish a fresh stuck exit from a stale closure in the broker's ring buffer. If the worker exits stuck very quickly (within the 3s liveness check, or during the `assigned` BOARD commit, or if a local config file makes `claude -p` crash fast), its `chat_close` `at` timestamp will be older than a "now" sampled at step 6 — and the classifier would filter out exactly the fast-fail stuck events M5 is meant to recover. Sampling `STARTED_AT` pre-spawn closes that window.
 
-   Then spawn the worker with `Bash(run_in_background=true)`. `<TIER.alias>` and `<TIER.effort>` come from `TIER_LADDER[START_TIER]` on first dispatch (step 7 writes `RUNNING[TASK.id].tier = START_TIER`); §P2.5 re-dispatches substitute the updated rung. M7 — every spawn is tier-qualified:
+   Then spawn the worker with `Bash(run_in_background=true)`. M8a — the spawn `cd`s into the **worktree path**, not `REPO_ROOT`, so the OS process cwd visible in `claude agents --json` matches `meta.worktree_path` for Step B's M8a liveness lookup. `<TIER.alias>` and `<TIER.effort>` come from `TIER_LADDER[START_TIER]` on first dispatch (step 7 writes `RUNNING[TASK.id].tier = START_TIER`); §P2.5 re-dispatches substitute the updated rung. M7 — every spawn is tier-qualified:
 
    ```bash
-   cd "<REPO_ROOT>" && claude -p \
+   cd "<REPO_ROOT>-<TASK.id>" && claude -p \
      --permission-mode bypassPermissions \
      --no-session-persistence \
      --output-format stream-json \
      --model <TIER.alias> \
      --effort <TIER.effort> \
      "$DISPATCH_PROMPT" \
-     > ".ccx/workers/<TASK.id>.log" 2>&1
+     > "<REPO_ROOT>/.ccx/workers/<TASK.id>.log" 2>&1
    ```
+
+   The log path stays under `REPO_ROOT/.ccx/workers/` (the supervisor's log directory created in P0), NOT under the worktree — worker logs survive worktree teardown on stuck/cycle-cap recovery (§P2.5 step 5) and the supervisor's P3 report references this absolute path.
 
    `<TIER.alias>` is one of `haiku | sonnet | opus` (NEVER the hyphenated ladder aliases `opus-xhigh` / `opus-max` — those are CLI surface only; the underlying model alias is always `opus` with effort varying). `<TIER.effort>` is one of `medium | high | xhigh | max`. The `--loops <WORKER_LOOPS>` token inside `$DISPATCH_PROMPT` (see §P2.2) is an independent axis — it controls the worker's internal review-fix cycle cap, not the supervisor's attempt count.
 
@@ -248,7 +261,13 @@ A2. **Skip A2 entirely when `STOP_DISPATCHING == true`** — no slot-fill, no ov
    - Sleep 3 seconds (`sleep 3`) to let `claude -p` get past initial argv parsing and config load.
    - Use `BashOutput` on `SHELL_ID`. If the shell has already terminated AND its exit status is non-zero (or log is empty + exited), treat as **spawn failure**:
      - Do NOT commit an `assigned` BOARD update.
-     - Record an in-memory BOARD update: `status: "blocked"`, `exit_status: "spawn-error"`, `notes: "claude -p exited immediately — see .ccx/workers/<TASK.id>.log"`.
+     - **M8a — tear down the pre-created worktree and branch.** Step 3a created `<REPO_ROOT>-<TASK.id>` and `ccx/<TASK.id>` before this liveness check ran; on spawn failure those artifacts MUST be removed so a future supervisor run (after the human fixes the underlying config/binary issue and flips the row back to `pending`) does not trip Step A step 1b's stale-artifact gate and re-block the task on phantom state from a dead spawn:
+       ```bash
+       git worktree remove --force "<REPO_ROOT>-<TASK.id>" 2>/dev/null
+       git branch -D "ccx/<TASK.id>" 2>/dev/null
+       ```
+       Best-effort `2>/dev/null` matches §P2.5 step 5's cleanup contract; if either operation fails (worktree busy, branch protection) the next supervisor run still hits stale-artifact, but the notes string below tells the human exactly which manual commands to run.
+     - Record an in-memory BOARD update: `status: "blocked"`, `exit_status: "spawn-error"`, `notes: "claude -p exited immediately — see .ccx/workers/<TASK.id>.log. Worktree/branch cleanup attempted; if 'git worktree list' or 'git branch --list ccx/<TASK.id>' still show artifacts, remove manually before re-running."`.
      - Append `<TASK.id>` to `BLOCKED_IDS` (step D persists it).
      - Continue the outer slot-fill loop; do not spawn a replacement in the same pass.
      - **Remove `<TASK.id>` from `PENDING_POOL`** per the pool-removal rule — the in-memory BOARD is now `blocked` but not yet persisted, so A1 would otherwise re-select this task and re-attempt the spawn.
@@ -262,9 +281,25 @@ A2. **Skip A2 entirely when `STOP_DISPATCHING == true`** — no slot-fill, no ov
 
 ### Step B — Drain completions
 
+**M8a — refresh the agent registry once per Step B pass.** Before iterating `RUNNING`, run `claude agents --json` exactly once and parse the result. The JSON shape is an array of `{pid, cwd, kind, startedAt, sessionId, status, name?}` — store it as `AGENTS_BY_CWD: { <absolute-cwd> -> <entry> }` keyed by the `cwd` field. `cwd` is the only field the supervisor controls deterministically at spawn time (PID and `sessionId` are assigned by `claude -p` at spawn time and are not knowable before the worker reports them via `chat_register`), so it is the join key — matching by `branch` is not possible because the JSON does not expose branch. See `docs/supervisor-design.md` §16 for the rationale (replaces M7's `BashOutput`-on-`shell_id` exit detection, which broke under M8b's Phase-2 respawn pattern and got worse as worker counts climbed).
+
+If the `claude agents --json` invocation itself fails — non-zero exit, empty stdout, or the parser rejects the output as non-JSON — set a run-level flag `M8A_AGENTS_FALLBACK = true`, log once to stderr `M8a: claude agents --json unavailable — falling back to BashOutput polling for the rest of the run`, and skip the registry refresh for every subsequent Step B pass too (refreshing a failing command on every iteration would spam the same warning). The fallback path below restores the legacy `BashOutput`-on-`shell_id` exit check so a broken Claude Code install degrades cleanly rather than misclassifying every worker as exited.
+
 For each `(task_id, meta)` in `RUNNING`:
 
-1. Check the background shell status (via `BashOutput` on `meta.shell_id` — inspect whether the shell has terminated and its exit code). If still running, skip this task.
+1. **Worker liveness check (M8a).** If `M8A_AGENTS_FALLBACK == false`, look up `AGENTS_BY_CWD[meta.worktree_path]`:
+   - **Entry present** → the worker is still alive (kind/status/pid are all informational only — presence alone establishes liveness). **Skip this task** for the rest of Step B; the next pass will check again.
+   - **Entry absent** → the worker MAY have exited. Before falling through to step 2 below, call `BashOutput` on `meta.shell_id` ONCE as a cross-check and to capture the worker's exit status — record it as `EXIT_CODE`. Two cases:
+     - **Bash also reports the shell as exited** → the worker is genuinely done. Fall through to step 2 with `EXIT_CODE`; the classifier splits `approved` (`EXIT_CODE == 0` + new commits) from `error` (`EXIT_CODE != 0`).
+     - **Bash reports the shell as still running** → the registry snapshot raced with the worker's startup (e.g. `claude -p` hasn't registered itself yet, cwd normalization difference, or a transient registry omission). The worker is alive and may still be actively writing to the worktree. **Skip this task** for the rest of Step B and re-check on the next pass — classifying as exited and entering the recovery/block paths would tear down the worktree underneath a live `claude -p`, potentially spawning a duplicate attempt on top of in-flight worker edits. The next pass's claude agents --json refresh will most likely show the entry; if it persistently does not, the eventual Bash exit will resolve the race cleanly.
+
+   The registry only reports liveness (presence/absence), not exit code, which is why the BashOutput exit-status read is mandatory even on the registry-says-absent path. Without it, a worker that crashed AFTER making a commit would be merged as approved work.
+
+   If `M8A_AGENTS_FALLBACK == true`, use the legacy check instead: call `BashOutput` on `meta.shell_id` and inspect whether the shell has terminated and its exit code. If still running, skip this task; otherwise capture `EXIT_CODE` from the BashOutput result and fall through to step 2. This branch is only reached when the registry probe itself failed at the top of Step B; healthy supervisor runs never enter it.
+
+   The {running / approved / stuck / cycle-cap / crashed / unknown} taxonomy maps onto the existing exit_status vocabulary via step 2's three branches plus §P2.5's stuck/cycle-cap sub-classifier — no new state is introduced.
+
+   The `shell_id` field stays in `RUNNING` records regardless of which branch fires: Step C's adaptive-polling primitive (pre-M6 §18.2) still reads `BashOutput` on `shell_id` to detect new worker output, the absent-entry exit-code read above also relies on it, and `.ccx/workers/<task_id>.log` is the user-facing artifact for post-mortem. Only the exit-**detection** branch moves off PID-style polling; the log-correlation handle persists.
 2. If exited, classify the outcome using two repo-state signals (the M1 subset of §4.3 — broker `chat_close` state is currently ignored because the integration-branch commit is the authoritative "approved" signal; adding `chat_close` as a cross-check is a later milestone):
 
    ```bash
@@ -675,7 +710,7 @@ answers, replace this comment block with real `- q:` / `  a:` entries. -->
 `DISPATCH_PROMPT` is a single string containing:
 
 ```
-/ccx:loop --loops <WORKER_LOOPS> --worktree=<TASK.id> --commit --chat
+/ccx:loop --loops <WORKER_LOOPS> --commit --chat
 
 <task_brief path=".ccx/tasks/<TASK.id>.md" id="<TASK.id>">
 {{full contents of the brief file just written in P2.A step 2}}
@@ -707,12 +742,12 @@ on Discord. Either way, your chat_ask returns the reply verbatim.
 
 ```
 <task_brief path=".ccx/tasks/<TASK.id>.md" id="<TASK.id>">
-Brief exceeds 4KB — read the file from the worktree. It is committed
-at dispatch time and therefore present at the worktree fork point.
+Brief exceeds 4KB — read the file from your cwd. It is committed at
+dispatch time and therefore present at the worktree fork point.
 </task_brief>
 ```
 
-The worker reads the brief via `Read` in its Phase 1. Because the supervisor commits the brief to `INTEGRATION` before spawning, `git worktree add … <INTEGRATION_HEAD>` includes it.
+The worker reads the brief via `Read` in its Phase 1. M8a — the supervisor commits the brief on `INTEGRATION` (Step A step 3) and then forks the worker worktree from the post-commit `HEAD` (Step A step 3a), so the brief is on the worker branch from its first commit. The worker is spawned with cwd = worktree path, so the relative path `.ccx/tasks/<TASK.id>.md` resolves to the committed brief on its first `Read` call.
 
 ### P2.3 — Match-confidence rubric
 
@@ -873,7 +908,7 @@ Steps 1 and 2 are deliberately ordered **signal dispatch first, budget check sec
       - **"Other" with non-empty free-text guidance:** `guidance_text` is non-empty; continue to step 4. `next_tier = meta.tier`.
       - **"Other" with empty or whitespace-only text:** re-interpret as abort. Stash BOARD-row update with `exit_status: "stuck-aborted"`, `notes: "human selected 'Other' for guidance but supplied empty text — treated as abort"`. Audit identical to the abort path above, citation set to the literal string `"(empty-other-ignored)"` so a later auditor can distinguish a deliberate abort from an empty-other reinterpretation. Remove from `RUNNING`. Continue the drain loop.
 
-4. **Append the guidance to the brief** (only reached when step 3(e) produced non-empty `guidance_text`). Read `REPO_ROOT/.ccx/tasks/<task_id>.md`, locate the `## Decisions` section, and decide how to insert:
+4. **Append the guidance to the brief** (only reached when step 3(e) produced non-empty `guidance_text`). Read `REPO_ROOT/.ccx/tasks/<task_id>.md` (M8a — supervisor's checkout remains the canonical brief source across dispatches, so re-dispatches after worktree teardown can re-seed from this path), locate the `## Decisions` section, and decide how to insert:
 
    - **Section contains only the HTML-comment template** (first-time revision): replace the `<!-- ... -->` block with the new entry.
    - **Section already has `- q:` / `a:` entries** (rare — reached if a prior milestone seeded Decisions, or if the task recovered from a `stuck-aborted` state in a previous run that was then manually re-seeded): append the new entry after the last existing one. Preserve prior entries byte-for-byte.
@@ -888,15 +923,15 @@ Steps 1 and 2 are deliberately ordered **signal dispatch first, budget check sec
 
    Use the YAML `|` block scalar so multi-line guidance preserves formatting. Quote the `q:` string; the `a:` block scalar handles embedded quotes/newlines without escaping. If `guidance_text` ends with a trailing newline, keep it — YAML block scalars preserve final newlines by default.
 
-   Commit the revised brief alone:
+   Commit the revised brief alone on `INTEGRATION` (supervisor's `REPO_ROOT` checkout — the canonical brief source; the worktree's uncommitted seed copy is about to be torn down in step 5 and re-seeded fresh from `REPO_ROOT` on re-dispatch):
 
    ```bash
    git add -- ".ccx/tasks/<task_id>.md"
    git commit -m "supervisor: revise <task_id> brief — M7 ladder-exhausted recovery (attempt <meta.attempts + 1>)"
    ```
 
-   If the commit fails (pre-commit hook, signing, etc.), DO NOT proceed with re-dispatch. The re-dispatched worker's worktree would fork from a `HEAD` that does NOT contain the guidance, silently wasting the attempt. Instead:
-   - **Unstage the failed brief revision immediately** via `git restore --staged -- ".ccx/tasks/<task_id>.md"`. Without this, the brief file stays in the integration-branch index and Step D's subsequent `git add -- BOARD.md` + `git commit` would sweep the abandoned revision into the batch supervisor commit — producing an integration-branch commit that records a brief revision for a task that never actually re-dispatched. The edit itself stays in the worktree (unstaged) so the human can inspect and either commit it manually after fixing the hook or discard it; P0 step 3's clean-tree gate on the next supervisor run will refuse to start until they do one or the other.
+   If the commit fails (pre-commit hook, signing, etc.), DO NOT proceed with re-dispatch. The next dispatch would re-seed the worktree from a `REPO_ROOT/.ccx/tasks/<task_id>.md` whose new content is uncommitted on `INTEGRATION`, and Step D's subsequent `git add -- BOARD.md` + `git commit` would sweep the unstaged revision into the batch supervisor commit — producing an integration-branch commit that records a brief revision for a task that never actually re-dispatched. Instead:
+   - **Unstage the failed brief revision immediately** via `git restore --staged -- ".ccx/tasks/<task_id>.md"`. The edit itself stays in the supervisor's `REPO_ROOT` checkout (unstaged) so the human can inspect and either commit it manually after fixing the hook or discard it; P0 step 3's clean-tree gate on the next supervisor run will refuse to start until they do one or the other.
    - **Best-effort worktree + branch cleanup** (same pattern as step 2's attempts-exhausted path): `git worktree remove --force "<REPO_ROOT>-<task_id>" 2>/dev/null` then `git branch -D "ccx/<task_id>" 2>/dev/null`, then verify via `git rev-parse --verify "refs/heads/ccx/<task_id>" 2>/dev/null` and `test -e "<REPO_ROOT>-<task_id>"`. Without this, after the human fixes the hook/signing problem and flips the BOARD row back to `pending`, the next dispatch would immediately trip Step A step 1b's stale-artifact gate and re-block the task until the human also runs `git worktree remove` / `git branch -D` by hand. Record residue for the `notes` string: `cleanup_residue = "branch ccx/<task_id> still present"` and/or `"worktree still at <REPO_ROOT>-<task_id>"` when either check still sees the artifact; else `cleanup_residue = ""`.
    - Append `<task_id>` to `BLOCKED_IDS`.
    - Record `LAST_SIGNAL_ON_BLOCK[<task_id>] = signal` (here `signal == "stuck"` always, since this path is only reachable from the opus/max stuck branch — still set it explicitly so P3's session-close classifier in P0.5 step 7 rule 3 can apply the same "`LAST_SIGNAL_ON_BLOCK[id] == 'stuck'` → stuck-flavored" rule uniformly across every stuck-derived exit_status).
@@ -930,7 +965,8 @@ Steps 1 and 2 are deliberately ordered **signal dispatch first, budget check sec
    - Audit: `decision: "stuck-cleanup-failed"`, `source: <signal_source>`, `citation: "signal=<signal>,tier=<tier_str>"`, `reply: null`, `brokerOk: null`. Where `<signal_source>` is `"auto"` when reached from the automatic stuck bump or cycle-cap path, and `"human-ask"` when reached from the opus/max human-guidance path.
    - Remove from `RUNNING`. Continue the outer Step B drain loop. Do NOT attempt re-dispatch with stale artifacts in place.
 
-6. **Re-dispatch.** Reuse Step A steps 4–6 (capture pre-spawn `STARTED_AT`, spawn, verify-live, persist `assigned`) with these differences from a first dispatch:
+6. **Re-dispatch.** Reuse Step A steps 3a–6 (recreate the worktree, capture pre-spawn `STARTED_AT`, spawn, verify-live, persist `assigned`) with these differences from a first dispatch:
+   - **M8a — recreate the worktree before spawn.** Step 5 above tore down `<REPO_ROOT>-<task_id>` and `ccx/<task_id>`; Step A step 3a's `git worktree add -b "ccx/<task_id>" "<REPO_ROOT>-<task_id>" "<BASE_REV>"` MUST run before step 4's `cd "<REPO_ROOT>-<task_id>" && claude -p ...` or the spawn `cd` lands on a nonexistent path and every re-dispatch becomes an immediate spawn failure. `BASE_REV` for re-dispatch is `$(git rev-parse HEAD)` — supervisor's current HEAD, which already contains the brief commit (from the initial Step A step 3 OR the §P2.5 step 4 revision commit), plus any merges that landed for other tasks since the initial dispatch. Forking from a fresh `git rev-parse HEAD` each time preserves the "fork from merge target" invariant for the re-dispatch attempt too. Step 3a's stale-artifact failure handling applies identically to re-dispatch: if `git worktree add` fails (race with another supervisor instance, disk full, etc.), block with `exit_status: "stuck-cleanup-failed"` (same exit_status used by step 5's existing cleanup-failed branch, since the operational meaning is the same — the supervisor couldn't restore the worktree state needed for re-dispatch) instead of `stale-artifact` to distinguish recovery-path failures from first-dispatch ones in the audit log.
    - The spawn's `--model <alias>` and `--effort <effort>` come from `TIER_LADDER[next_tier]`, not `TIER_LADDER[START_TIER]`. Concretely, substitute `<TIER.alias>` and `<TIER.effort>` in Step A step 4's one-liner with the resolved rung.
    - The log-redirection operator in Step A step 4's spawn command becomes `>>` instead of `>` (re-dispatch log continuity — both attempts' stdout/stderr land in the same `.ccx/workers/<task_id>.log` in order). First-time dispatch keeps `>` so a stale log from a prior run does not silently concatenate. This applies to every re-dispatch path in this section — automatic bump, cycle-cap retry, and opus/max human-guided retry.
    - The `attempts` field in step 6's BOARD update is `meta.attempts + 1`, not `1`. Clear `finished_at: null` and `exit_status: null` since this is a fresh attempt.

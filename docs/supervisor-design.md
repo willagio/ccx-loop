@@ -380,7 +380,7 @@ while pending_tasks_exist() or running:
 ## 10. Merge policy
 
 - **Integration branch** defaults to `main` but `--integration=<branch>` can redirect. Supervisor never force-pushes.
-- **Merge mechanism**: `git merge --squash` (pre-M6 §16.1; replaces an earlier `--no-ff` design). Each task lands as exactly one supervisor-authored commit on the integration branch with subject `T-<id>: <title>`. Rationale: `/ccx:loop` Phase 4 already squashes its review-fix cycles into a single commit, so a `--no-ff` merge would only add a tree-empty graph node — pure noise. Squash gives the same audit surface (one commit per task, identifiable by its `T-<id>:` subject) without the extra commit. Conflict detection still happens before commit creation: the supervisor stages the squash, inspects `git ls-files -u`, and either commits (clean) or rolls back via `git restore --staged --worktree .` (conflict). The rollback is guarded by a pre-merge `git status --porcelain` cleanliness assert so the wholesale restore can never destroy unrelated uncommitted changes.
+- **Merge mechanism**: `git merge --squash` (pre-M6 §18.1; replaces an earlier `--no-ff` design). Each task lands as exactly one supervisor-authored commit on the integration branch with subject `T-<id>: <title>`. Rationale: `/ccx:loop` Phase 4 already squashes its review-fix cycles into a single commit, so a `--no-ff` merge would only add a tree-empty graph node — pure noise. Squash gives the same audit surface (one commit per task, identifiable by its `T-<id>:` subject) without the extra commit. Conflict detection still happens before commit creation: the supervisor stages the squash, inspects `git ls-files -u`, and either commits (clean) or rolls back via `git restore --staged --worktree .` (conflict). The rollback is guarded by a pre-merge `git status --porcelain` cleanliness assert so the wholesale restore can never destroy unrelated uncommitted changes.
 - **Worktree cleanup** is deferred to the human. Supervisor reports the `git worktree remove` commands after merge, following `/ccx:loop`'s existing contract (which also leaves worktrees).
 - **Post-merge `BOARD.md` update** is a single commit per batch of merges, not per individual merge, to avoid N+1 commits cluttering history. Commit subject: `supervisor: update board — merged T-12, T-15, T-19, blocked T-9`.
 
@@ -410,7 +410,7 @@ A stricter alternative — `--permission-mode acceptEdits` plus per-repo `.claud
 --integration B     branch to merge into (default main)
 --max-tasks M       stop after M merges even if tasks remain (default unlimited)
 --dry-run           parse BOARD.md, print dispatch plan, do nothing
---chat              supervisor lifecycle messages to Discord (§16.3)
+--chat              supervisor lifecycle messages to Discord (§18.3)
 --max-attempts N    per-task dispatch budget (default 4; §15.3)
 --worker-loops N    per-worker cycle cap, forwarded as /ccx:loop --loops N (default 3; §15.3)
 --start-tier TIER   first-attempt rung: haiku|sonnet|opus|opus-xhigh|opus-max (default sonnet; §15.3)
@@ -432,11 +432,11 @@ Phases inside `/ccx:supervisor`:
 3. **M3 — autonomous answering** (shipped 2026-04-17, commit `7e4b8bc`). Supervisor consults the brief's `## Decisions`, BOARD direction, and prior worker commits on the integration branch to answer without escalating. Every decision lands in `.ccx/supervisor-audit/<RUN_ID>.jsonl` for audit.
 4. **M4 — scope conflict detection** (shipped 2026-04-17, commit `573e39c`). Scope glob overlap check gates parallelism via `git ls-files -- <pathspecs>` intersection with literal and prefix fallbacks. Pre-merge conflict dry-run (`git merge --no-commit --no-ff <branch>` then `git commit --no-edit` or `git merge --abort`) separates conflict detection from commit creation. New blocked reasons: `merge-aborted`, `merge-commit-failed` (the latter sets `STOP_DISPATCHING` and drains existing peers via new exit condition 3).
 5. **M5 — stuck recovery** (shipped 2026-04-17). Broker records every `chat_close` status in an in-memory ring buffer (`chat_supervisor_recent_closures` MCP tool, capped at 256 entries). Supervisor Step B peels stuck exits out of the generic `no-commit` bucket by querying the buffer. First stuck per task triggers a single `AskUserQuestion` (three-way: re-dispatch with guidance via "Other", re-dispatch unchanged, abort); on guidance the supervisor appends a `## Decisions` entry, commits the revised brief, cleans the prior worktree+branch, and re-spawns. `STUCK_REDISPATCH_CAP = 2` hard-caps at one re-dispatch; a second stuck blocks as `stuck-exhausted`. New blocked reasons: `stuck-exhausted`, `stuck-aborted`, `stuck-recovery-failed`, `stuck-cleanup-failed`. BOARD rows gain an `attempts` field (optional, normalized to 0).
-6. **Pre-M6 hotfixes** (shipped 2026-04-18; design in §16). Four runtime hotfixes surfaced by the first e2e run land before M6: §16.1 `--squash` merge policy (replaces `--no-ff`, one supervisor-authored commit per task with `T-<id>: <title>` subject); §16.2 Step C adaptive `BashOutput`-watch + 2s-sleep + 30s-cap polling primitive (replaces fixed `sleep 3`, robust to LLM deviation and harness sleep guards); §16.3 supervisor Discord presence via new `--chat` flag (lifecycle `chat_send` for run start / dispatch / merge / block / stuck / end); §16.4 repo basename prefix on every ccx-chat message body (disambiguates concurrent ccx sessions across repos).
+6. **Pre-M6 hotfixes** (shipped 2026-04-18; design in §18). Four runtime hotfixes surfaced by the first e2e run land before M6: §18.1 `--squash` merge policy (replaces `--no-ff`, one supervisor-authored commit per task with `T-<id>: <title>` subject); §18.2 Step C adaptive `BashOutput`-watch + 2s-sleep + 30s-cap polling primitive (replaces fixed `sleep 3`, robust to LLM deviation and harness sleep guards); §18.3 supervisor Discord presence via new `--chat` flag (lifecycle `chat_send` for run start / dispatch / merge / block / stuck / end); §18.4 repo basename prefix on every ccx-chat message body (disambiguates concurrent ccx sessions across repos).
 7. **M6 — planning phase** (proposed 2026-04-18, design in §14). Free-form-input → `BOARD.md` draft, mandatory review gate before dispatch. Closes the last onboarding cliff: M1–M5 assume `BOARD.md` already exists, but today the schema is plugin-internal knowledge and the plugin ships no scaffolding. M6 makes planning the entry path so humans never hand-author YAML.
 8. **M7 — model tier escalation** (proposed 2026-04-22, design in §15). Supervisor escalates the worker model + effort tier on each `stuck` re-dispatch (same tier on `cycle-cap`), following a fixed 5-rung ladder `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)`. Adds three flags — `--max-attempts`, `--worker-loops`, `--start-tier` — and makes the "if the loop drags on, escalate to a better model" behaviour automatic. No BOARD schema change; supervisor + docs only.
 
-M1 and M2 are enough to be useful. M3–M5 are runtime quality-of-life. The pre-M6 hotfixes (§16) tighten merge history, fix a Step C deadlock failure mode, and give the supervisor its own Discord voice. M6 is the entry-path fix and is the last blocker for non-author adoption. M7 automates stuck-escalation along a fixed model+effort ladder so the human is only asked when the ladder is exhausted.
+M1 and M2 are enough to be useful. M3–M5 are runtime quality-of-life. The pre-M6 hotfixes (§18) tighten merge history, fix a Step C deadlock failure mode, and give the supervisor its own Discord voice. M6 is the entry-path fix and is the last blocker for non-author adoption. M7 automates stuck-escalation along a fixed model+effort ladder so the human is only asked when the ladder is exhausted. M8a (§16) swaps worker exit detection over to `claude agents --json` and fast-forwards local integration to `origin/<INTEGRATION>` so every worker worktree forks from a fresh upstream base; M8b (§17, owned by T-2) is the duet loop built on top of that infra.
 
 ---
 
@@ -619,11 +619,67 @@ These are explicit out-of-scopes so a future M8 design has a starting point for 
 
 ---
 
-## 16. Pre-M6 hotfixes and follow-ups (from e2e 2026-04-18)
+## 16. M8a — Supervisor infra refresh
+
+Status: shipped 2026-05-23. Two narrow follow-ups to M7 that unblock M8b's duet loop (§17 — owned by T-2): replace the brittle worker-exit detector with a registry-backed lookup, and force every worker worktree to fork from the remote integration tip rather than the supervisor's potentially-stale local HEAD.
+
+### 16.1 Worker exit detection via `claude agents --json`
+
+**Why:** Through M7 the supervisor watched workers exit by polling the spawning Bash shell (`BashOutput` on the recorded `shell_id`). Two failure modes:
+
+- A worker that re-spawns inside its own session (M8b's "Phase 2 respawn") releases its original shell handle; the supervisor would then observe the shell as terminated and misclassify a still-live worker as exited.
+- Under M8b's higher worker count, every Step B pass ran a `BashOutput` probe per `RUNNING` entry — quadratic in worker count, with each probe also pulling the worker's growing log into the supervisor context just to read its exit status.
+
+**What changed:** Step B now refreshes the agent registry **once per pass** with `claude agents --json` and joins each `RUNNING` entry against the result by `cwd == meta.worktree_path`. The JSON shape is an array of `{pid, cwd, kind, startedAt, sessionId, status, name?}`; `cwd` is the only field the supervisor controls deterministically at spawn time (PID and `sessionId` are assigned by `claude -p` and not known a priori), so it is the join key. Presence ⇒ still running (skip this task); absence ⇒ exited, and Step B step 2 takes over with the existing repo-state classifier (approved / no-commit / error) — those branches then feed §P2.5's recovery sub-classifier as before, so the {running / approved / stuck / cycle-cap / crashed / unknown} taxonomy maps cleanly onto the pre-existing exit_status vocabulary without new state.
+
+The `shell_id` field stays in `RUNNING` records because Step C's adaptive polling primitive (§18.2) still reads `BashOutput` on `shell_id` to detect new output, and the log path is the user-facing artifact for post-mortem. Only the **exit-detection** branch moves off PID-style polling; the log-correlation handle persists for triage.
+
+**Fallback.** When `claude agents --json` itself fails (binary missing, non-zero exit, malformed JSON) the supervisor reverts to the legacy `BashOutput`-on-`shell_id` exit check for the rest of the run, logging a single line — `M8a: claude agents --json unavailable — falling back to BashOutput polling for the rest of the run` — so a broken install degrades cleanly rather than misclassifying every worker as exited.
+
+**Required Claude Code feature version:** `claude agents --json` lands in Claude Code 2.2.0. Earlier versions emit a non-zero exit and trip the fallback above automatically.
+
+### 16.2 `worktree.baseRef: "fresh"` for worker worktree spawn
+
+**Why:** Through M7 every worker worktree forked from the supervisor's local `HEAD` (`git worktree add` inside `/ccx:loop --worktree` resolved its base ref to whatever the parent checkout currently pointed at). But the supervisor's local checkout often lagged `origin/<INTEGRATION>` by minutes or hours — the human is reading email while waiting — and worker review-fix cycles then re-discovered issues that were already merged upstream, wasting Codex review tokens and producing merge-aborted exits when the squash dry-run finally collided with the diverged tree.
+
+**What changed (two parts):**
+
+1. **Phase P0 step 3a — fetch + fast-forward local integration once per run.** Supervisor runs `git fetch --quiet origin "<INTEGRATION>:refs/remotes/origin/<INTEGRATION>"` (explicit refspec; bare `git fetch origin <branch>` lands only in `FETCH_HEAD` and would leave `refs/remotes/origin/<INTEGRATION>` stale), then `git merge --ff-only refs/remotes/origin/<INTEGRATION>`. On FF success, local `INTEGRATION` advances to the upstream tip; every dispatch in this run forks from that fresh base. On FF failure (local ahead of origin from unpushed merges, or diverged) the supervisor logs one line and continues with local `HEAD` — the brief's documented `else local HEAD` fallback. NEVER attempt a non-FF merge, rebase, or hard reset mid-run; rewriting the supervisor's history while it is committing briefs and BOARD updates to the prior `HEAD` would corrupt in-flight state.
+
+2. **Step A step 3a — supervisor pre-creates the worker worktree from the post-brief-commit HEAD.** Worktree creation moved out of `/ccx:loop --worktree` (worker-side) into the supervisor itself. The supervisor commits the brief on `INTEGRATION` (Step A step 3) and then forks the worker worktree from `git rev-parse HEAD` — which is the same commit Step B will eventually squash-merge INTO. Forking from `origin/<INTEGRATION>` directly would be a mistake: when local `INTEGRATION` has diverged from origin (the second/third/etc. dispatch of a run includes prior task merges on local), the `git log "<INTEGRATION>..ccx/<TASK.id>"` diff in Step B step 2 would include upstream-only commits as if they were worker work, and Step B step 3's squash would replay them into the `T-<id>: <title>` commit — silently inflating audit history and risking false conflicts. Forking from local `HEAD` (post-brief) keeps Step B's diff window exactly what it has always been: "what changed on the worker branch after fork."
+
+The supervisor's `cd "<REPO_ROOT>-<TASK.id>" && claude -p ...` spawn ensures the OS process cwd matches `meta.worktree_path` — that is the join key §16.1's M8a liveness check reads, and it only works because the supervisor owns the worktree path. Stripping `--worktree=<TASK.id>` from `DISPATCH_PROMPT` is the matching worker-side change: `/ccx:loop` without `--worktree` runs in cwd, which IS the worktree.
+
+Failure cases each have a documented fallback (none are fatal):
+
+- No `origin` remote configured, or network down: P0 step 3a's `git fetch` errors are swallowed by `|| true`. Local `INTEGRATION` does not advance; dispatches fork from whatever local `HEAD` was at supervisor start. No warning — purely-local repos are a legitimate case.
+- Local integration diverged from origin: FF declines, supervisor logs one line and continues with local `HEAD`. Subsequent dispatches still benefit from the per-dispatch invariant (fork from merge target).
+- `git worktree add` itself fails (disk full, permission denied, race with another supervisor instance): per-task block with `exit_status: "stale-artifact"` and a notes string carrying the verbatim git stderr; the loop continues with other tasks.
+
+**Required Claude Code feature version:** none — implemented entirely with plain `git fetch` / `git merge --ff-only` / `git worktree add -b`, which work back to Git 2.5 (`worktree add -b` was added in 2.5.0). The change is supervisor-internal and does not touch `/ccx:loop`'s public flags.
+
+### 16.3 Explicit out-of-scope (M8b backlog)
+
+Listed here so the M8b implementer (T-2) does not re-debate them:
+
+- **`$CLAUDE_EFFORT` hook integration.** Echo the active effort level in worker logs for triage. Tracked but defer to M8b post-ship.
+- **`--bg --name` named background sessions.** Would let `claude agents --json` surface the supervisor-assigned task id rather than only the `cwd` — useful for log-tail tooling, but the `cwd` join key already works.
+- **`/code-review --comment` PR integration.** Posting Codex findings as inline PR comments. Separate axis; not blocked by M8a's infra.
+- **`parentSettingsBehavior` for worker spawn.** Inheriting supervisor settings into the worker's spawn-time configuration. Touches Claude Code subagent surface; not part of M8a's `claude -p`-driven dispatch flow.
+
+---
+
+## 17. M8b — Duet loop (deferred to T-2)
+
+Reserved for T-2 to author per BOARD direction. Until then this slot is intentionally empty so the existing cross-references in §18 / §19 do not collide.
+
+---
+
+## 18. Pre-M6 hotfixes and follow-ups (from e2e 2026-04-18)
 
 Items surfaced during the first end-to-end run against `/tmp/ccx-e2e`. Each scoped tightly so they ship independently or batched with M6. Do NOT pick these up until the e2e sandbox is cleaned or rebuilt — the current `/tmp/ccx-e2e/` has a half-merged dispatch that should be wiped before re-testing.
 
-### 16.1 `--squash` merge policy (replaces `--no-ff`) — shipped 2026-04-18
+### 18.1 `--squash` merge policy (replaces `--no-ff`) — shipped 2026-04-18
 
 **Why:** §10 picked `--no-ff` on the assumption workers land multi-commit branches worth preserving as a group. In practice `/ccx:loop`'s Phase 4 squashes cycles into one final commit, so a task branch has exactly one commit — and `--no-ff` adds a parent-only merge commit that carries **zero new tree changes**, just a graph node. With `--squash`, one task = one supervisor-authored commit on integration: cleaner history with the same audit surface.
 
@@ -634,7 +690,7 @@ Items surfaced during the first end-to-end run against `/tmp/ccx-e2e`. Each scop
 - design doc §10 — update policy + rationale.
 - memory M4 note — `--no-ff --no-commit` → `--squash`.
 
-### 16.2 Step C sleep robustness — shipped 2026-04-18 (option B)
+### 18.2 Step C sleep robustness — shipped 2026-04-18 (option B)
 
 **Why:** Spec says `sleep 3`. First e2e run had supervisor-Claude run `sleep 60` instead (LLM deviated from the literal instruction — model inferred "60s is more reasonable when waiting on LLM workers"). Claude Code 2.1.x blocks long standalone leading sleeps, so the scheduling loop hung at Step C and workers' completions were never drained.
 
@@ -644,7 +700,7 @@ Items surfaced during the first end-to-end run against `/tmp/ccx-e2e`. Each scop
 
 Recommend B — it's the same amount of prose to document, more robust to LLM deviation, and measurably reduces wake-ups on quiet iterations.
 
-### 16.3 Supervisor Discord presence — shipped 2026-04-18 (`--chat` flag)
+### 18.3 Supervisor Discord presence — shipped 2026-04-18 (`--chat` flag)
 
 **Why:** Workers post to Discord via their `chat_send` calls, so the user sees worker chatter. Supervisor itself has no Discord route, so from Discord you cannot tell "a supervisor run started in repo X", "it dispatched T-1 and T-2", "T-1 merged / T-2 blocked", or "the run ended with 3 merged". That's the orchestration timeline the user actually wants to watch, and it's entirely missing.
 
@@ -658,7 +714,7 @@ Recommend B — it's the same amount of prose to document, more robust to LLM de
 
 **Mechanism:** Supervisor registers its own ccx-chat session at P0 with a label like `[supervisor] <repo_basename>`. Uses `chat_send` only (no asks, nothing queues). Gated behind a `--chat` flag on `/ccx:supervisor` to mirror worker semantics. When `backend: "supervisor"`, the supervisor's own sends fall through to the Discord fallback — already plumbed in `adapters/supervisor.mjs`.
 
-### 16.4 Repo-name prefix on all ccx-chat messages — shipped 2026-04-18
+### 18.4 Repo-name prefix on all ccx-chat messages — shipped 2026-04-18
 
 **Why:** User runs many concurrent ccx sessions across different repos (`ccx-loop`, `gold-digger-*`, etc.). Current Discord messages carry session label + branch but not the repo. Prefix disambiguates.
 
@@ -672,7 +728,7 @@ Non-goal: re-rendering the branch as a prefix (already in session label, would d
 
 ---
 
-## 17. Open questions
+## 19. Open questions
 
 - **Broker singleton vs supervisor scope.** The broker is global (one per host). Can two simultaneous supervisor sessions coexist? Probably not on MVP — require one supervisor at a time, enforce with a lock file.
 - **What if the human closes the supervisor session mid-run?** Workers keep running (they're independent processes). On resume (`/ccx:supervisor --resume`), re-read `BOARD.md` and reconcile by checking branch HEADs, `.ccx/workers/*.log` tails, and `chat_close` records. Stretch goal.
