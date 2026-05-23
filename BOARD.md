@@ -30,9 +30,14 @@ Design decisions locked in this milestone (referenced by T-2 notes and woven int
       - plugins/ccx/commands/supervisor.md
       - docs/supervisor-design.md
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on: []
+  brief: .ccx/tasks/T-1.md
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-1"
+  branch: "ccx/T-1"
+  started_at: "2026-05-23T04:17:23Z"
   notes: |
     Two narrow changes to supervisor.md plus a §16 stub in
     docs/supervisor-design.md documenting them.
