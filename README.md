@@ -53,7 +53,7 @@ This installs `discord.js` + MCP SDK into the plugin, creates `~/.claude/ccx-cha
 ### `/ccx:loop` — fixed N cycles
 
 ```
-/ccx:loop [--loops N] [--min-severity LEVEL] [--min-confidence N] [--commit] <task>
+/ccx:loop [--loops N] [--min-severity LEVEL] [--min-confidence N] [--commit] [--duet] [--codex-first] <task>
 ```
 
 | Flag | Description | Default |
@@ -62,6 +62,10 @@ This installs `discord.js` + MCP SDK into the plugin, creates `~/.claude/ccx-cha
 | `--min-severity LEVEL` | Ignore findings below `critical\|high\|medium\|low` | `low` (fix all) |
 | `--min-confidence N` | Ignore findings with confidence < N (0.0–1.0) | `0.0` |
 | `--commit` | Auto-commit on clean exit (gated) | off |
+| `--duet` | Duet mode: Claude and Codex alternate as implementer, each reviewing the other's last turn. Requires `--loops >= 2`. | off |
+| `--codex-first` | Flip the duet lead so Codex implements first. Only meaningful with `--duet`. | off |
+
+**Duet mode** (`--duet`). Replaces the default single-implementer Phase 2 with a four-turn alternation: `Claude implement → Codex review → Codex implement → Claude review → ...`. Convergence fires only when two consecutive review turns from **different** reviewers approve with no rejecting or non-empty-diff turn between them, so duet runs need at least 2 cycles (parse-time error otherwise). The Claude review side spawns a sub-Claude `Agent` that runs the user-installed `code-review` skill against the worker's current diff. See `docs/supervisor-design.md` §17 for the full state machine.
 
 ### `/ccx:forever` — loop until approval
 
@@ -126,7 +130,11 @@ Motion on the ladder is driven by the worker's exit:
 
 `--start-tier` chooses the first rung; lower rungs are unreachable for that run. The default `--max-attempts 4` exactly covers a pure stuck climb from `sonnet` → `opus/high` → `opus/xhigh` → `opus/max`, so the top-rung human prompt is reachable without raising the budget. `--start-tier haiku` needs at least `--max-attempts 5` to walk all five rungs on stuck exits.
 
-Milestones shipped: M1 dispatch + naive merge, M2 broker supervisor adapter, M3 autonomous chat_ask answering, M4 scope-overlap gate + pre-merge dry-run, M5 stuck-exit auto-revise + re-dispatch, M6 `/ccx:plan` onboarding (separate command above), M7 automatic model tier escalation. See `docs/supervisor-design.md` for the full design.
+**Duet mode for supervisor tasks.** There is no `--duet` supervisor flag — the choice is per-task, declared in the brief frontmatter at `.ccx/tasks/T-<id>.md`. Add `loop_flags: ["--duet"]` (and optionally `"--codex-first"`) to the brief YAML; the supervisor preserves the field across regenerations and re-dispatches and forwards the listed flags verbatim to each `/ccx:loop` spawn. Only `--duet` and `--codex-first` are on the allowlist; anything else blocks the task as `loop-flags-rejected`. Requires `--worker-loops >= 2` (the duet convergence rule needs at least two review turns).
+
+**M8a infra notes.** Worker exit detection now reads `claude agents --json` (matched by `cwd == meta.worktree_path`) instead of `BashOutput`-on-`shell_id` polling, and Phase P0 best-effort fast-forwards your local integration branch to `origin/<INTEGRATION>` so each worker worktree forks from a fresh upstream base. Both have documented fallbacks (legacy `BashOutput`, local HEAD) so older Claude Code versions and purely-local repos degrade cleanly.
+
+Milestones shipped: M1 dispatch + naive merge, M2 broker supervisor adapter, M3 autonomous chat_ask answering, M4 scope-overlap gate + pre-merge dry-run, M5 stuck-exit auto-revise + re-dispatch, M6 `/ccx:plan` onboarding (separate command above), M7 automatic model tier escalation, M8a `claude agents --json` exit detection + fresh-upstream worker base, M8b per-brief duet passthrough. See `docs/supervisor-design.md` for the full design.
 
 ### Examples
 
@@ -145,6 +153,9 @@ Milestones shipped: M1 dispatch + naive merge, M2 broker supervisor adapter, M3 
 
 # 1 cycle + auto-commit
 /ccx:loop --loops 1 --commit Update error messages in validation middleware
+
+# Duet mode: Claude and Codex alternate as implementer (needs --loops >= 2)
+/ccx:loop --duet Refactor the rate limiter to use a sliding window
 ```
 
 ## How it works
@@ -177,6 +188,7 @@ Phase 4: Commit (gated — unresolved / test failure / cap-hit / stuck-exit bloc
 - **Auto-commit gate.** `--commit` only fires when the loop exited cleanly (approved/filtered-clean), tests pass, and no findings are unresolved. Otherwise it downgrades to an interactive prompt.
 - **Explicit staging.** Only files the loop intentionally edits (Edit/Write + intentional Bash ops like `mv`, `rm`, formatters) are staged. Generated artifacts like coverage output never slip in.
 - **Dirty-tree handling.** Pre-existing uncommitted changes are parsed via `git status -z` and handled explicitly. A hunk-granularity caveat is documented: if Claude edits a file that was already dirty, the user's prior hunks will be committed too (stash to avoid).
+- **Duet mode** (`--duet`). Two different reviewers (Codex and Claude) must approve consecutively to terminate. Any reject by either reviewer, or any non-empty implementer diff between the two approvals, resets the convergence counter. The Claude side of the ladder uses the M7 tier escalation when run under `/ccx:supervisor`; Codex stays at its default model.
 
 If Codex is not installed, implementation is preserved on disk and you're prompted to install it — no unreviewed commit.
 
