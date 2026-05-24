@@ -125,12 +125,15 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/supervisor.md
       - docs/supervisor-design.md
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on:
     - T-1
   brief: .ccx/tasks/T-2.md
-  attempts: 0
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-2"
+  branch: "ccx/T-2"
+  started_at: "2026-05-24T14:27:26Z"
   notes: |
     Move worker worktree spawn from the supervisor's current location
     (sibling of the repo: ~/Repositories/ccx-loop-T-X) into
