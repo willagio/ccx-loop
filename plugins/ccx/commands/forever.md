@@ -251,7 +251,7 @@ Otherwise: ask the user ONE question — whether to commit.
 **Chat bridge:** when `CHAT_SESSION_ID` is set and the commit question must be asked:
 1. Call `chat_set_phase` with `commit?` and `chat_ask` with a concise prompt (include the exit reason and any unresolved/skipped counts).
 2. If the result's `source` is `timeout`, `cancel`, or `closed`, or the call errors, fall back to `AskUserQuestion`. Otherwise interpret the `reply` string (case-insensitive `yes`/`y`/`commit`/`ok` → commit; anything else → stop).
-3. On final exit (whether committed or not), call `chat_close` with `status` set to one of: `approved`, `filtered-unapproved`, `stuck`, `cap-hit`, `aborted`, `error` — matching the actual exit path. Run `chat_close` exactly once, in a `finally`-style block that runs even when earlier phases threw.
+3. On final exit (whether committed or not), call `chat_close` with `status` set to one of: `approved`, `filtered-unapproved`, `stuck`, `cap-hit`, `commit-marker-leak`, `aborted`, `error` — matching the actual exit path. The `commit-marker-leak` value is reserved for the M9 T-3 commit-hygiene exit described below; it appears on the close envelope (visible in the broker's closure ring buffer and the worker log) so the operator can identify the leak. The supervisor's existing generic no-commit handler (`plugins/ccx/commands/supervisor.md` Step B step 4) does NOT preserve this distinction on the BOARD row — it stashes `exit_status: "no-commit"` for any closure that is not `stuck` / `budget-exhausted`, so `commit-marker-leak` shows up on BOARD as a generic `no-commit` with the actual diagnosis only in the worker log. Both surfacing the leak status on the BOARD row AND routing it through §P2.5 stuck-exit auto-revise are follow-up supervisor.md edits — adding `commit-marker-leak` to the stashed `exit_status` mapping and to §P2.5's stuck-flavored signal set — that are out of T-3's scope per the brief's `scope.include` constraint. Until those follow-ups land, the operator handles a `commit-marker-leak` exit by inspecting the worker log to confirm the leak, optionally revising the brief, and flipping the BOARD row from `blocked` back to `pending`. Run `chat_close` exactly once, in a `finally`-style block that runs even when earlier phases threw.
 
 If committing:
 - Track `EDITED_PATHS` throughout the loop: the set of file paths Claude **intentionally** created, modified, renamed, or deleted. This includes:
@@ -263,5 +263,62 @@ If committing:
 - Never use `git add -A` or `git add .` — stage explicit paths only, so untracked generated files and editor swap files never slip in.
 - Write a concise commit message describing the task and summarizing any significant findings fixed.
 - Include `Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>`.
+- **Pass the draft through the M9 T-3 commit-message hygiene pipeline below** before invoking `git commit`. The hygiene pipeline is the single writer-side enforcement point for M9 invariant 3 (no `T-N:` / `supervisor:` / `ccx/` markers in customer-mode commits); skipping it would let the supervisor's M5 retry budget burn fixing leaks the worker itself could have caught.
+
+### Commit message hygiene (M9 T-3)
+
+Runs after the staging set is computed and the draft message is written, but BEFORE `git commit` fires. The pipeline has three steps; the first two are gated on `ccx.dogfood`, the third is independent. This section mirrors the same-named section in `plugins/ccx/commands/loop.md` — keep them in lockstep when one changes.
+
+**Mode resolution.** Read once at the top of the pipeline:
+
+- `IS_DOGFOOD = git config --get --type=bool ccx.dogfood` (treat absent/error as `false`).
+- `WANT_TRAILER = git config --get --type=bool ccx.commit.trailer` (treat absent/error as `false`).
+- `TASK_ID = $CCX_TASK_ID` env var (set by `/ccx:supervisor` Step A step 4 alongside `$CCX_TASK_BRIEF_PATH`). Falls back to the `<task_brief id="...">` attribute in the dispatch prompt when the env var is unset; falls back to `null` for direct (non-supervisor) `/ccx:forever` invocations.
+
+When `IS_DOGFOOD == true`: skip Step 1 and Step 2 entirely (the draft message — typically carrying `T-X:` or `supervisor:` prefixes — lands as-is, which is the documented dogfood workflow). Step 3 still runs when `WANT_TRAILER == true` and `TASK_ID` is non-null.
+
+**Step 1 — style-mirror rewrite.** Resolve the integration branch in this order; each candidate MUST pass `git rev-parse --verify --quiet <ref>` (exit 0, non-empty stdout) before it is selected. First passing candidate wins:
+1. The output of `git symbolic-ref --short refs/remotes/origin/HEAD` — used **verbatim** (typically `origin/main`). Do NOT strip the `origin/` prefix; using the remote-tracking ref directly means the candidate resolves even when no local `main` branch exists, which is the common shape for fresh checkouts of an upstream repo.
+2. Local `main`, then local `master` — each verified before selection so a missing local branch falls through cleanly.
+3. `HEAD` — a plain ref that always resolves (any git repo with at least one commit has a HEAD). Do NOT use a `HEAD~30..HEAD` range: in repos with fewer than 31 commits the range is an invalid revision and `git log -30 HEAD~30..HEAD` fails. The `-30` cap on `git log` below truncates to the last 30 commits regardless of how far back history extends, so a plain `HEAD` is the safe upper bound.
+
+When at least one candidate verifies, read `git log --pretty='%s%n%b%n--' -30 <integration-branch>` to capture the last 30 commits' subject+body shape. When none verify (brand-new repo with no commits, or a detached worker branch on a repo whose only ref is the worker's own branch), the style sample is the empty string — Step 1 still runs, but the LLM has nothing to mirror and will fall back to the prompt's explicit "strip task IDs / tooling markers" instructions. **Step 1 is never skipped:** skipping it on no-style-sample would let the draft's tooling markers fall through to Step 2 unchanged, and the regex gate would then deterministically hit three times in a row on every regen attempt (the prompt-less retries can't strip the markers either), producing a guaranteed `commit-marker-leak` exit for any valid draft on a fresh repo.
+
+Pass the style sample (possibly empty) AND the draft message through the in-session rewrite using this prompt template verbatim (do NOT paraphrase — the supervisor's M5 retry logic depends on the worker producing stable rewrites across attempts):
+
+> Rewrite the proposed commit message to match this repo's existing convention (prefix style, subject case, imperative vs past tense, trailing period, body presence). Strip any task IDs (T-NN) or tooling markers (`supervisor:` subjects, `ccx/...` paths or branch names). Preserve unrelated Git trailers (`Co-Authored-By`, `Signed-off-by`, etc.) verbatim. Output the rewritten message only — no preamble, no quotes, no fenced block.
+
+The worker performs this rewrite in-session (no external API call, no separate model dimension). The worker's current model tier (M7 §15 ladder rung) drives the rewrite; per the brief's Decisions, message rewriting is well within haiku's competence and no rung promotion is needed.
+
+**Step 2 — marker-strip regex gate.** The regex below uses PCRE-style syntax with a negative lookbehind (`(?<!...)`) — supported by PCRE2 (`grep -P`), Python `re`, and ECMAScript ES2018+. Apply it to the rewritten subject AND body, joined with a single `\n`, with case-insensitive matching enabled:
+
+```
+(?<![A-Za-z0-9])(T-[0-9]+:|\[T-[0-9]+\]|\bT-[0-9]+\b|supervisor:\s*(dispatch|update board)?|ccx/)
+```
+
+The `(?i)` inline modifier is **not** part of the pattern body — it is a PCRE-only construct that ECMAScript `RegExp` rejects with a `SyntaxError` at construction time. Implementors choose the case-insensitive flag in their regex engine's native form: `grep -i -P …`, `python re.compile(pattern, re.IGNORECASE)`, `new RegExp(pattern, 'i')` in Node, etc.
+
+The leading `(?<![A-Za-z0-9])` is a **negative lookbehind for any alphanumeric character** (matches start-of-string AND any non-alphanumeric prefix — whitespace, punctuation, brackets, backticks). The brief's original prefix was `(^|\s)`, which only matched start-of-string or literal whitespace and therefore missed common punctuation-wrapped markers like `Merge branch \`ccx/T-3\``, `fix (T-3)`, or `revert ccx/T-3-foo`. Broadening to the negative lookbehind catches every realistic tooling-marker shape the brief's "narrow to tooling-marker shapes" intent describes; this is a deliberate, documented deviation from the brief's literal regex (the only such deviation in T-3). See `docs/supervisor-design.md` §18.2.6 for the rationale anchor.
+
+The regex matches tooling-marker shapes, not ordinary product words: `dispatch events` passes (no `supervisor:` prefix); `T-shirt` passes (the `\bT-[0-9]+\b` branch needs digits after `T-`, and the lookbehind blocks `MyT-3` because `y` is alphanumeric); `Co-Authored-By: Claude` passes (no `ccx/` slash); `1T-3:` passes (the digit `1` blocks the lookbehind). On match:
+
+- Increment `commit_marker_attempts` (initialized to `0` at pipeline entry).
+- If `commit_marker_attempts < 3`: go back to Step 1 and regenerate. Append the line `The previous rewrite still contained these tooling markers: <comma-separated match list>. Strip them.` to the Step 1 prompt template for retries — naive in-line stripping is forbidden per the brief's Decisions (it leaves dangling syntax like `: subject` after `T-3:` is removed).
+- If `commit_marker_attempts == 3`: set `commit_marker_leak = true`. Skip `git commit` entirely. Phase 4's `finally`-block `chat_close` invocation MUST pass `status: "commit-marker-leak"` — see the Chat-bridge status taxonomy above. Print the final regenerated message and the matched markers to the worker log so the operator (and any future supervisor wiring per the taxonomy note above) can see what failed.
+
+  **Phase 3 rollback.** Because the hygiene pipeline runs inside Phase 4, Phase 3's `.handoff.md` update has already touched the worktree by the time this exit fires. Restore atomicity (the failed loop run leaves no observable trace in the worktree) by reverting that file before exit: `git checkout HEAD -- <handoff_path>` if the file was tracked, OR `rm <handoff_path>` if Phase 3 created it new. If Phase 3 was skipped (no `.handoff.md` present), this rollback is a no-op. Do NOT touch any other file — `EDITED_PATHS` from Phase 1/Phase 2 is preserved on disk for the operator to inspect or salvage.
+
+When the regex returns no match, the rewritten message is the canonical message; proceed to Step 3.
+
+**Step 3 — opt-in `Ccx-Task` trailer.** When `WANT_TRAILER == true` AND `TASK_ID` is non-null, append a parseable Git trailer to the canonical message body. Use `git interpret-trailers --in-place --trailer "Ccx-Task: <TASK_ID>"` against the commit-message file (or `--no-divider` against stdin if no file is in flight), which:
+- canonicalises the trailer block separator (blank line before trailers);
+- inserts the new trailer alongside any existing `Co-Authored-By` / `Signed-off-by` lines without duplicating;
+- is parseable later via `git interpret-trailers --parse`, satisfying the brief's Acceptance criterion.
+
+**Ordering relative to Step 2.** The trailer is appended AFTER Step 2's regex gate has already passed, so the writer-side gate never inspects the trailer line (the gate would otherwise match `Ccx-Task: T-X` via the `\bT-[0-9]+\b` alternation branch and trigger a false positive). T-6's reader-side `ccx verify` MUST mirror this ordering by parsing trailers via `git interpret-trailers --parse` and applying the regex only to the non-trailer portion of the subject + body — the brief's invariant 3 names the opt-in `Ccx-Task: T-X` trailer as the single permitted exception precisely to keep this contract symmetric across the writer (T-3) and the reader (T-6). Documenting the contract here so T-6's implementation can rely on it without re-deriving the exception.
+
+Default `WANT_TRAILER == false` produces no trailer. When `TASK_ID` is null (direct `/ccx:forever` invocation without a supervisor), the trailer step is silently a no-op — there is nothing to trail.
+
+**Why two layers, not one.** The regex gate alone could mangle natural-language commits ("supervisor: dispatch" rewritten as "dispatch:" reads poorly); the LLM pass alone is non-deterministic and can regress. The two-layer design lets the LLM produce a clean rewrite the regex then audits, with three retries before giving up. T-6's `ccx verify` enforces the same regex at merge time as a defence in depth — see `docs/supervisor-design.md` §18.2.6.
 
 If the user says no: stop.
