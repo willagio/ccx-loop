@@ -1082,12 +1082,97 @@ The cleanup contract is "any exit_status" per the brief — including `merge-com
 - **Migration of legacy sibling worktrees** from pre-T-2 customer-mode runs. The next supervisor run's Step A step 1b stale-artifact gate refuses to overwrite the legacy path; the operator runs `git worktree remove <REPO_ROOT>-<task_id>` once and the next dispatch lands at the new T-2 location. Auto-migration is rejected for the same reason T-1's BOARD migration is rejected — moving paths inside P0 would mutate operator state before the supervisor has even checked broker availability.
 - **Validation that `<STATE_DIR>/worktrees/` is writable, or that `<STATE_DIR>` and `REPO_ROOT` are on the same filesystem.** Both are user-environment concerns; an unwritable `<STATE_DIR>` surfaces as the existing Step A step 3a `git worktree add` failure (classified as `stale-artifact` with the git stderr in notes), which already covers the diagnostic path. Cross-FS is documented in §18.2.4 above; no pre-flight check is added.
 
+### 18.2.6 T-3 — Commit message hygiene
+
+Status: proposed (2026-05-24). Touches: `plugins/ccx/commands/loop.md` Phase 4 (the worker's commit step), `plugins/ccx/commands/forever.md` Phase 4 (same pipeline mirrored), and this design subsection. T-3 ships the writer-side enforcement of invariant 3 (no `T-N:` / `supervisor:` / `ccx/` markers in customer-mode commits); T-6's `ccx verify` re-applies the same regex at merge time as the corresponding reader-side gate. Two layers because the worker's LLM rewrite may regress and a one-layer regex check is fragile.
+
+The operational SSOT for the pipeline is the **Commit message hygiene** subsection in both command files (loop.md and forever.md carry the same three-step procedure verbatim — keep them in lockstep when one changes). This subsection is the **algorithmic SSOT** — the rewrite prompt template, the regex, the dogfood bypass, the trailer mechanics, and the new `commit-marker-leak` exit status are anchored here.
+
+**Pipeline shape** (runs once per worker, between draft-message assembly and `git commit` in Phase 4):
+
+1. Worker assembles the draft message exactly as today (subject + body + `Co-Authored-By` trailer per §15's worker contract).
+2. **Style-mirror pass** — `git log --pretty='%s%n%b%n--' -30 <integration-branch>` + draft → in-session LLM rewrite.
+3. **Marker-strip regex gate** — applied to the rewritten subject + body; on hit, go back to step 2; three consecutive hits abort the worker with `exit_status: commit-marker-leak`.
+4. **Optional `Ccx-Task: T-X` trailer** — appended when `ccx.commit.trailer = true` AND `$CCX_TASK_ID` (or the dispatch prompt's `<task_brief id>`) is resolvable.
+
+Dogfood mode (`ccx.dogfood = true`) **skips steps 2 and 3 entirely** — the draft message lands as-is, preserving the legible `T-X:` / `supervisor: dispatch` prefixes that make the dogfood narrative auditable. Step 4 is independent of dogfood mode; it still respects `ccx.commit.trailer = true` so a dogfood operator can still emit machine-parseable provenance if desired.
+
+**Integration-branch resolution** (used by step 2's `git log`). Each candidate MUST pass `git rev-parse --verify --quiet <ref>` before selection. First passing candidate wins:
+
+1. The output of `git symbolic-ref --short refs/remotes/origin/HEAD` used **verbatim** (typically `origin/main`). Do NOT strip the `origin/` prefix: stripping yields a bare `main` that may not exist as a local ref on fresh upstream checkouts where `git pull` has not yet populated a local tracking branch, and `git log -30 main` would fail. The remote-tracking ref resolves whenever the upstream publishes its `HEAD`, which is the common case.
+2. Else try local `main`, then local `master`. Each candidate is verified individually so a missing local branch falls through cleanly.
+3. Else `HEAD` — always resolves in any repo with at least one commit. Do NOT use a `HEAD~30..HEAD` range here: in repos with fewer than 31 commits the range is an invalid revision and `git log -30 HEAD~30..HEAD` fails. The `-30` cap on `git log` itself truncates to the last 30 commits regardless of history depth, so plain `HEAD` is the safe upper bound.
+
+If none verify (brand-new repo with no commits, or a worker branch on a repo whose only ref is the worker's own branch), the worker still runs step 2 with an empty style sample — the LLM has no convention to mirror but the prompt's explicit "strip task IDs / tooling markers" instructions are still active, so the rewrite still produces a marker-stripped draft. **Step 2 is never skipped on no-style-sample:** skipping it would let the draft's tooling markers fall through to step 3 unchanged, and the regex gate would deterministically hit three times in a row on every regen attempt (the empty-prompt retries can't strip the markers either), producing a guaranteed `commit-marker-leak` exit for any valid draft on a fresh repo.
+
+**Rewrite prompt template** (verbatim — the worker MUST NOT paraphrase this; M5's stuck-exit auto-revise depends on stable rewrites across retries to detect "the worker can't satisfy the regex" vs "the worker phrased the prompt differently and got lucky"):
+
+> Rewrite the proposed commit message to match this repo's existing convention (prefix style, subject case, imperative vs past tense, trailing period, body presence). Strip any task IDs (T-NN) or tooling markers (`supervisor:` subjects, `ccx/...` paths or branch names). Preserve unrelated Git trailers (`Co-Authored-By`, `Signed-off-by`, etc.) verbatim. Output the rewritten message only — no preamble, no quotes, no fenced block.
+
+On a retry after a regex hit, the worker appends one extra line to this prompt naming the markers that survived the previous rewrite:
+
+> The previous rewrite still contained these tooling markers: `<comma-separated match list>`. Strip them.
+
+Naive in-line stripping (e.g. regex-replace `T-N:` → ``) is forbidden by the brief's Decisions: it leaves dangling syntax (`": fix bug"` after stripping `T-3:`) and produces unnatural results. The whole point of step 2 is naturalness; only an LLM rewrite delivers that.
+
+**Marker-strip regex** (anchor copy — both command files quote this exact string; never paraphrase or "improve" it without amending this subsection in the same commit). Pattern body in PCRE-style syntax with a negative lookbehind (`(?<!...)`); case-insensitive matching is applied via the engine's native flag (e.g. `grep -i -P`, `re.compile(..., re.IGNORECASE)`, `new RegExp(..., 'i')`) and is NOT encoded as an inline `(?i)` modifier — ECMAScript `RegExp` rejects inline mode flags with a `SyntaxError` at construction time:
+
+```
+(?<![A-Za-z0-9])(T-[0-9]+:|\[T-[0-9]+\]|\bT-[0-9]+\b|supervisor:\s*(dispatch|update board)?|ccx/)
+```
+
+Branch-by-branch rationale:
+
+- `T-[0-9]+:` — the colon-suffix form workers used pre-M9 (`T-3: add CSV export`).
+- `\[T-[0-9]+\]` — the bracketed form occasionally seen in PR titles or square-bracketed prefixes.
+- `\bT-[0-9]+\b` — bare task ids anywhere in subject or body (`Implements T-12`); the word boundaries prevent matching `T-shirt` or `T-pose`.
+- `supervisor:\s*(dispatch|update board)?` — the supervisor's own commit subjects (matches `supervisor:`, `supervisor: dispatch`, `supervisor: update board`); the optional capture group means a bare `supervisor:` also matches.
+- `ccx/` — the worker-branch and worktree-path prefix. Requires a forward slash, so `Co-Authored-By: Claude` (which contains the substring `ccx` only as part of `Claude` — no slash) passes cleanly.
+
+The leading `(?<![A-Za-z0-9])` is a **negative lookbehind for any alphanumeric character** (matches start-of-string AND any non-alphanumeric prefix — whitespace, punctuation, brackets, backticks). It prevents matches inside identifiers like `MyT-3Class` (the preceding `y` is alphanumeric, so the lookbehind blocks) while catching the punctuation-wrapped marker shapes the brief's "narrow to tooling-marker shapes" intent describes — `Merge branch \`ccx/T-3\``, `fix (T-3)`, `revert ccx/T-3-foo`. Per the brief's Decisions, the regex is **not configurable per repo** — a customer wanting custom regex is a rabbit hole; M9 ships one fixed regex and defers configurability.
+
+**Deliberate deviation from the brief's literal regex.** The brief specifies `(?i)(^|\s)(...)` as the regex body. T-3's implementation broadens the prefix from `(^|\s)` to the negative lookbehind `(?<![A-Za-z0-9])` to fix a correctness gap discovered during T-3 review: the original `(^|\s)` only anchored at start-of-string or literal whitespace and silently passed every realistic punctuation-wrapped marker form (backtick-quoted in `Merge branch` messages, parenthesised in conversational subjects, slash-prefixed in path-style references). The broadened prefix preserves the brief's stated intent ("Match tooling-marker shapes, not ordinary product words") and is the only T-3 deviation from the brief's literal regex; every other alternation branch and the case-insensitive flag policy are kept verbatim. The `(?i)` inline mode flag is also dropped from the pattern body in favour of the engine-native flag (see the regex preamble above) — that change is a portability fix, not a semantic deviation.
+
+**The `commit-marker-leak` exit status.** New worker exit status introduced by T-3; reserved value in the `chat_close({status})` taxonomy of `/ccx:loop` and `/ccx:forever`. Fires when `commit_marker_attempts` reaches 3 in step 3 (two regex hits followed by a third that exhausts the budget). The worker:
+
+1. Sets `commit_marker_leak = true`, skips `git commit` entirely.
+2. **Rolls back Phase 3's `.handoff.md` update** (the hygiene pipeline runs inside Phase 4, AFTER Phase 3 has already touched the worktree). `git checkout HEAD -- <handoff_path>` if it was tracked, `rm <handoff_path>` if Phase 3 created it new, no-op if Phase 3 was skipped (no `.handoff.md` present). This restores atomicity — a failed loop run leaves no observable trace in the worktree beyond the substantive `EDITED_PATHS` from Phases 1–2, which are preserved so the operator can salvage them. Without this rollback, the commit-marker-leak exit would leave a stale handoff edit on disk while the commit it described never landed.
+3. Writes the final regenerated message and the matched markers to the worker log so the operator can see what failed.
+4. Phase 4's `finally`-block invokes `chat_close({sessionId, status: "commit-marker-leak"})` exactly once.
+
+**Supervisor-side handling — current behaviour and follow-up.** The worker's `chat_close({status: "commit-marker-leak"})` envelope is visible in the broker's closure ring buffer and in the worker log, so an operator who knows to look can identify the leak. However, the supervisor's existing generic no-commit handler (`supervisor.md` Step B step 4) hardcodes `exit_status: "no-commit"` for any closure that is not `stuck` / `budget-exhausted`, so `commit-marker-leak` reaches the BOARD row as the generic `no-commit` label — the leak distinction is lost on BOARD until a follow-up supervisor.md edit surfaces it. And because §P2.5's stuck-flavored signal mapping today branches only on `stuck` and `budget-exhausted`, the task does not automatically auto-revise and re-dispatch on a leak exit either — it simply blocks with the generic `no-commit` BOARD label until the operator intervenes.
+
+Two follow-up supervisor.md edits are therefore needed to deliver the full M9 contract for this exit:
+1. **Surface the actual close status on the BOARD row** — extend the generic no-commit handler to map known `chat_close` statuses (starting with `commit-marker-leak`) onto the stashed `exit_status` field, replacing the catch-all `"no-commit"` label.
+2. **Route `commit-marker-leak` into §P2.5's stuck-flavored signal set** — alongside `stuck` / `budget-exhausted` — so the supervisor automatically revises the brief and re-dispatches per the M5 mechanism.
+
+Both touch `plugins/ccx/commands/supervisor.md`, which is OUT of T-3's `scope.include` and therefore deliberately untouched in this milestone. They can ship independently of the worker contract documented here. Until they land, the documented unblock path is: operator reads the worker log to confirm a leak (the BOARD row shows `no-commit`), optionally revises the brief, and flips the BOARD row from `blocked` back to `pending` for re-dispatch.
+
+**Trailer mechanics** (step 4). When the gate passes:
+
+- Read `$CCX_TASK_ID` from the env (set by `/ccx:supervisor` Step A step 4 alongside `$CCX_TASK_BRIEF_PATH`); fall back to the dispatch prompt's `<task_brief id="...">` attribute when the env var is unset; fall back to `null` for direct (non-supervisor) `/ccx:loop` invocations.
+- Read `ccx.commit.trailer` via `git config --get --type=bool` (treat absent or error as `false`).
+- When both are non-null/true, run `git interpret-trailers --in-place --trailer "Ccx-Task: <TASK_ID>"` against the commit-message file. `git interpret-trailers` is the right tool because it canonicalises the trailer block separator (blank line before trailers), inserts the new line alongside any existing `Co-Authored-By` / `Signed-off-by` lines without duplicating, and produces output that `git interpret-trailers --parse` can extract — satisfying the brief's Acceptance criterion.
+
+**Ordering relative to step 3** (load-bearing for T-6's reader-side regex). The trailer is appended in step 4 AFTER step 3's regex gate has already accepted the rewritten subject + body. The writer-side regex therefore never inspects the trailer line — without this ordering, the gate would match the `T-X` substring in `Ccx-Task: T-X` via the `\bT-[0-9]+\b` alternation branch and produce a false positive, making the opt-in trailer feature impossible to use. T-6's reader-side `ccx verify` MUST mirror this ordering: parse trailers via `git interpret-trailers --parse` and apply the regex only to the non-trailer portion of the subject + body. The brief's invariant 3 names the opt-in `Ccx-Task: T-X` trailer as the single permitted exception precisely to anchor this symmetric writer/reader contract; T-3 documents it here so T-6's implementation can rely on it without re-deriving the exception.
+
+The trailer is opt-in for customer mode (default off — invariant 3 forbids ccx markers unless explicitly opted in) but the same flag works in dogfood mode for operators who want machine-parseable provenance on top of the human-legible `T-X:` prefix.
+
+**Why two layers** (LLM rewrite + regex gate). A regex-only enforcement would mangle natural-language commits ("supervisor: dispatch events" rewritten as ": dispatch events" reads poorly), so the LLM produces a clean rewrite the regex audits. An LLM-only enforcement is non-deterministic — the model might regress on a low-effort tier or under a confusing prompt and emit `T-3:` again. The two-layer design gives the LLM three attempts to satisfy the regex; T-6's `ccx verify` re-applies the same regex at merge time so even a rare model regression that slips through the worker is caught before mainline lands.
+
+**Out of scope for T-3** (per the brief and the M9 scope split):
+
+- The merge-time enforcement of the same regex (T-6 `ccx verify`).
+- The squashed-commit message rewrite at merge boundary (T-4 — applies the same pipeline one more time after the squash).
+- Any per-repo configurable regex (deferred indefinitely per the brief's Decisions).
+- Modifications to `supervisor.md` or any other command file beyond `loop.md` / `forever.md`. Two specific supervisor.md edits are needed to deliver the full M9 contract for the new `commit-marker-leak` exit — surfacing it on the BOARD row's `exit_status` field (today's generic no-commit handler collapses it to `"no-commit"`) and routing it into §P2.5's stuck-flavored signal set for auto-revise — and both are explicitly deferred follow-ups per the "Supervisor-side handling — current behaviour and follow-up" note above. T-3 stays within its `scope.include` constraint; the supervisor wiring can ship as a separate scoped task without changing the worker contract this subsection anchors.
+
 ### 18.8 Scope split across M9 tasks
 
 T-1 (this subsection's depth) establishes the resolver, the configuration surface, and the customer-mode write contract. T-2 (§18.2.1–§18.2.5 above) builds on it to relocate worker worktrees. The remaining M9 tasks each get a sibling subsection under §18 once they land:
 
 - **§18.2.1–§18.2.5 (T-2 — worktree relocation):** shipped — see the dedicated subsections above. Customer-mode worker worktrees live at `<STATE_DIR>/worktrees/<task_key>/` (readable basename = `<task_id>` by default, opaque sha256 prefix in paranoid mode), with a `_index.json` mapping in paranoid mode and automatic worktree teardown on every worker terminal exit.
-- **§18.2.6 (T-3 — commit hygiene):** removes `T-<id>:` / `supervisor:` commit subjects in customer mode, introduces the `Ccx-Task: T-X` trailer for opt-in provenance, and finalizes the `IS_DOGFOOD` gate on every supervisor-authored commit. T-3's filing.
+- **§18.2.6 (T-3 — commit hygiene):** shipped — see the dedicated subsection above. Customer-mode worker commits pass through a style-mirror LLM rewrite + marker-strip regex gate before `git commit` fires; three consecutive regex hits abort the worker with the new `commit-marker-leak` exit status. Opt-in `Ccx-Task: T-X` trailer when `ccx.commit.trailer = true`; dogfood mode (`ccx.dogfood = true`) bypasses both passes.
 - **§18.2.7 (T-4 — merge strategy + branch cleanup):** documents the `ccx.merge.strategy` config key, the squash-only default for customer mode, the dogfood-gated `no-ff` escape, and the automatic `git branch -d ccx/<task_id>` that follows T-2's worktree removal. T-4's filing.
 - **§18.2.8 (T-5 — inspection helpers + dogfood opt-in flag):** documents `/ccx:where`, `/ccx:board`, `/ccx:tasks`, `ccx link` / `ccx unlink`, and the operator-facing surface around `ccx.dogfood`. T-5's filing.
 - **§18.2.9 (T-6 — `ccx verify` + customer-mode README section):** the invariant table above operationalized as a script, plus the documentation hand-off to the README. T-6's filing.
