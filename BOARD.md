@@ -304,12 +304,15 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - .ccx-config
       - docs/supervisor-design.md
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on:
     - T-1
   brief: .ccx/tasks/T-5.md
-  attempts: 0
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-5"
+  branch: "ccx/T-5"
+  started_at: "2026-05-24T18:20:35Z"
   notes: |
     Surface the external state directory to humans through three
     helpers, plus formalize the dogfood escape hatch.
