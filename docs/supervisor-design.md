@@ -383,7 +383,7 @@ while pending_tasks_exist() or running:
 ## 10. Merge policy
 
 - **Integration branch** defaults to `main` but `--integration=<branch>` can redirect. Supervisor never force-pushes.
-- **Merge mechanism**: `git merge --squash` (pre-M6 §18.1; replaces an earlier `--no-ff` design). Each task lands as exactly one supervisor-authored commit on the integration branch with subject `T-<id>: <title>`. Rationale: `/ccx:loop` Phase 4 already squashes its review-fix cycles into a single commit, so a `--no-ff` merge would only add a tree-empty graph node — pure noise. Squash gives the same audit surface (one commit per task, identifiable by its `T-<id>:` subject) without the extra commit. Conflict detection still happens before commit creation: the supervisor stages the squash, inspects `git ls-files -u`, and either commits (clean) or rolls back via `git restore --staged --worktree .` (conflict). The rollback is guarded by a pre-merge `git status --porcelain` cleanliness assert so the wholesale restore can never destroy unrelated uncommitted changes.
+- **Merge mechanism**: `git merge --squash` (pre-M6 §19.1; replaces an earlier `--no-ff` design). Each task lands as exactly one supervisor-authored commit on the integration branch with subject `T-<id>: <title>`. Rationale: `/ccx:loop` Phase 4 already squashes its review-fix cycles into a single commit, so a `--no-ff` merge would only add a tree-empty graph node — pure noise. Squash gives the same audit surface (one commit per task, identifiable by its `T-<id>:` subject) without the extra commit. Conflict detection still happens before commit creation: the supervisor stages the squash, inspects `git ls-files -u`, and either commits (clean) or rolls back via `git restore --staged --worktree .` (conflict). The rollback is guarded by a pre-merge `git status --porcelain` cleanliness assert so the wholesale restore can never destroy unrelated uncommitted changes.
 - **Worktree cleanup** is deferred to the human. Supervisor reports the `git worktree remove` commands after merge, following `/ccx:loop`'s existing contract (which also leaves worktrees).
 - **Post-merge `BOARD.md` update** is a single commit per batch of merges, not per individual merge, to avoid N+1 commits cluttering history. Commit subject: `supervisor: update board — merged T-12, T-15, T-19, blocked T-9`.
 
@@ -413,7 +413,7 @@ A stricter alternative — `--permission-mode acceptEdits` plus per-repo `.claud
 --integration B     branch to merge into (default main)
 --max-tasks M       stop after M merges even if tasks remain (default unlimited)
 --dry-run           parse BOARD.md, print dispatch plan, do nothing
---chat              supervisor lifecycle messages to Discord (§18.3)
+--chat              supervisor lifecycle messages to Discord (§19.3)
 --max-attempts N    per-task dispatch budget (default 4; §15.3)
 --worker-loops N    per-worker cycle cap, forwarded as /ccx:loop --loops N (default 3; §15.3)
 --start-tier TIER   first-attempt rung: haiku|sonnet|opus|opus-xhigh|opus-max (default sonnet; §15.3)
@@ -435,11 +435,11 @@ Phases inside `/ccx:supervisor`:
 3. **M3 — autonomous answering** (shipped 2026-04-17, commit `7e4b8bc`). Supervisor consults the brief's `## Decisions`, BOARD direction, and prior worker commits on the integration branch to answer without escalating. Every decision lands in `.ccx/supervisor-audit/<RUN_ID>.jsonl` for audit.
 4. **M4 — scope conflict detection** (shipped 2026-04-17, commit `573e39c`). Scope glob overlap check gates parallelism via `git ls-files -- <pathspecs>` intersection with literal and prefix fallbacks. Pre-merge conflict dry-run (`git merge --no-commit --no-ff <branch>` then `git commit --no-edit` or `git merge --abort`) separates conflict detection from commit creation. New blocked reasons: `merge-aborted`, `merge-commit-failed` (the latter sets `STOP_DISPATCHING` and drains existing peers via new exit condition 3).
 5. **M5 — stuck recovery** (shipped 2026-04-17). Broker records every `chat_close` status in an in-memory ring buffer (`chat_supervisor_recent_closures` MCP tool, capped at 256 entries). Supervisor Step B peels stuck exits out of the generic `no-commit` bucket by querying the buffer. First stuck per task triggers a single `AskUserQuestion` (three-way: re-dispatch with guidance via "Other", re-dispatch unchanged, abort); on guidance the supervisor appends a `## Decisions` entry, commits the revised brief, cleans the prior worktree+branch, and re-spawns. `STUCK_REDISPATCH_CAP = 2` hard-caps at one re-dispatch; a second stuck blocks as `stuck-exhausted`. New blocked reasons: `stuck-exhausted`, `stuck-aborted`, `stuck-recovery-failed`, `stuck-cleanup-failed`. BOARD rows gain an `attempts` field (optional, normalized to 0).
-6. **Pre-M6 hotfixes** (shipped 2026-04-18; design in §18). Four runtime hotfixes surfaced by the first e2e run land before M6: §18.1 `--squash` merge policy (replaces `--no-ff`, one supervisor-authored commit per task with `T-<id>: <title>` subject); §18.2 Step C adaptive `BashOutput`-watch + 2s-sleep + 30s-cap polling primitive (replaces fixed `sleep 3`, robust to LLM deviation and harness sleep guards); §18.3 supervisor Discord presence via new `--chat` flag (lifecycle `chat_send` for run start / dispatch / merge / block / stuck / end); §18.4 repo basename prefix on every ccx-chat message body (disambiguates concurrent ccx sessions across repos).
+6. **Pre-M6 hotfixes** (shipped 2026-04-18; design in §19). Four runtime hotfixes surfaced by the first e2e run land before M6: §19.1 `--squash` merge policy (replaces `--no-ff`, one supervisor-authored commit per task with `T-<id>: <title>` subject); §19.2 Step C adaptive `BashOutput`-watch + 2s-sleep + 30s-cap polling primitive (replaces fixed `sleep 3`, robust to LLM deviation and harness sleep guards); §19.3 supervisor Discord presence via new `--chat` flag (lifecycle `chat_send` for run start / dispatch / merge / block / stuck / end); §19.4 repo basename prefix on every ccx-chat message body (disambiguates concurrent ccx sessions across repos).
 7. **M6 — planning phase** (proposed 2026-04-18, design in §14). Free-form-input → `BOARD.md` draft, mandatory review gate before dispatch. Closes the last onboarding cliff: M1–M5 assume `BOARD.md` already exists, but today the schema is plugin-internal knowledge and the plugin ships no scaffolding. M6 makes planning the entry path so humans never hand-author YAML.
 8. **M7 — model tier escalation** (proposed 2026-04-22, design in §15). Supervisor escalates the worker model + effort tier on each `stuck` re-dispatch (same tier on `cycle-cap`), following a fixed 5-rung ladder `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)`. Adds three flags — `--max-attempts`, `--worker-loops`, `--start-tier` — and makes the "if the loop drags on, escalate to a better model" behaviour automatic. No BOARD schema change; supervisor + docs only.
 
-M1 and M2 are enough to be useful. M3–M5 are runtime quality-of-life. The pre-M6 hotfixes (§18) tighten merge history, fix a Step C deadlock failure mode, and give the supervisor its own Discord voice. M6 is the entry-path fix and is the last blocker for non-author adoption. M7 automates stuck-escalation along a fixed model+effort ladder so the human is only asked when the ladder is exhausted. M8a (§16) swaps worker exit detection over to `claude agents --json` and fast-forwards local integration to `origin/<INTEGRATION>` so every worker worktree forks from a fresh upstream base; M8b (§17, proposed 2026-05-23) introduces `/ccx:loop --duet` so Claude and Codex alternate as implementer with each reviewing the other's turn, built on top of M8a's infra.
+M1 and M2 are enough to be useful. M3–M5 are runtime quality-of-life. The pre-M6 hotfixes (§19) tighten merge history, fix a Step C deadlock failure mode, and give the supervisor its own Discord voice. M6 is the entry-path fix and is the last blocker for non-author adoption. M7 automates stuck-escalation along a fixed model+effort ladder so the human is only asked when the ladder is exhausted. M8a (§16) swaps worker exit detection over to `claude agents --json` and fast-forwards local integration to `origin/<INTEGRATION>` so every worker worktree forks from a fresh upstream base; M8b (§17, proposed 2026-05-23) introduces `/ccx:loop --duet` so Claude and Codex alternate as implementer with each reviewing the other's turn, built on top of M8a's infra. M9 (§18, proposed 2026-05-24) plugs every leak vector ccx leaves in a user repo by relocating tool state outside the working tree, tightening commit hygiene, and adding a `ccx verify` gate that blocks merges on any detected leak.
 
 ---
 
@@ -635,7 +635,7 @@ Status: shipped 2026-05-23. Two narrow follow-ups to M7 that unblock M8b's duet 
 
 **What changed:** Step B now refreshes the agent registry **once per pass** with `claude agents --json` and joins each `RUNNING` entry against the result by `cwd == meta.worktree_path`. The JSON shape is an array of `{pid, cwd, kind, startedAt, sessionId, status, name?}`; `cwd` is the only field the supervisor controls deterministically at spawn time (PID and `sessionId` are assigned by `claude -p` and not known a priori), so it is the join key. Presence ⇒ still running (skip this task); absence ⇒ exited, and Step B step 2 takes over with the existing repo-state classifier (approved / no-commit / error) — those branches then feed §P2.5's recovery sub-classifier as before, so the {running / approved / stuck / cycle-cap / crashed / unknown} taxonomy maps cleanly onto the pre-existing exit_status vocabulary without new state.
 
-The `shell_id` field stays in `RUNNING` records because Step C's adaptive polling primitive (§18.2) still reads `BashOutput` on `shell_id` to detect new output, and the log path is the user-facing artifact for post-mortem. Only the **exit-detection** branch moves off PID-style polling; the log-correlation handle persists for triage.
+The `shell_id` field stays in `RUNNING` records because Step C's adaptive polling primitive (§19.2) still reads `BashOutput` on `shell_id` to detect new output, and the log path is the user-facing artifact for post-mortem. Only the **exit-detection** branch moves off PID-style polling; the log-correlation handle persists for triage.
 
 **Fallback.** When `claude agents --json` itself fails (binary missing, non-zero exit, malformed JSON) the supervisor reverts to the legacy `BashOutput`-on-`shell_id` exit check for the rest of the run, logging a single line — `M8a: claude agents --json unavailable — falling back to BashOutput polling for the rest of the run` — so a broken install degrades cleanly rather than misclassifying every worker as exited.
 
@@ -832,7 +832,7 @@ The duet runs inside one `/ccx:loop` worker session and emits one `chat_close` s
 
 - **`approved`** — convergence rule (§17.4) fired: two consecutive review approvals from different reviewers. This is the dominant happy-path exit under `--duet`.
 - **`filtered-clean`** — the convergence rule did not strictly fire but both reviewers' remaining findings all fell below `--min-severity` / `--min-confidence`. Mirrors `/ccx:loop`'s existing semantics (loop.md Step D rule 2).
-- **`stuck`** — a single `(file, title, body)` finding key appeared in **three consecutive review turns** (from either reviewer, counted across both sides — the streak is a property of the finding, not of the reviewer who raised it). Duet does not double the stuck threshold because the failure mode is the same: the implementer cannot satisfy the criticism after two prior fix attempts; the third repeat justifies escalation. **Recovery asymmetry under M8b's Claude-only M7 ladder (§17.5):** the driver records which side's most-recent non-empty implement turn preceded the stuck streak — Claude-side or Codex-side — and surfaces that hint by writing one line to the worker's log file (`.ccx/workers/T-<id>.log`) **immediately before** calling `chat_close`, formatted exactly as `M8B_STUCK_SIDE: claude` or `M8B_STUCK_SIDE: codex` (one literal line, no trailing punctuation). The supervisor's §P2.5 stuck classifier — which already opens `meta.log_path` for triage — tails the last ~20 log lines on every `stuck` closure and scans for that token; presence → record `stuck_side` in `LAST_SIGNAL_ON_BLOCK`'s metadata alongside the existing signal value, absence → treat as `stuck_side=unknown` (a non-duet worker, or an old log). The chat broker's `chat_close` tool surface and recent-closures ring (`{sessionId,cwd,branch,label,status,at}`) stay unchanged — log-tail is the existing channel for worker-internal state the supervisor needs at block time, used by every block-handler since M5's `stuck-recovery-failed` notes path. Supervisor's §15 ladder bump still fires on every `stuck` exit, but only meaningfully escalates Claude-side stuck (a stronger Claude rung produces different code on Claude's implement turns). A **Codex-side stuck** would re-run with the same Codex default and most likely repeat the same `stuck` exit until `--max-attempts` is exhausted — explicitly an M8b limitation, tracked in §17.11 for M9 follow-up where the Codex side gets a ladder of its own or a separate `stuck-codex` block path. Until then, the human who sees a `stuck_side=codex` annotation in supervisor's Discord lifecycle event (§18.3) should disable duet for that task and re-dispatch single-implementer rather than re-trying duet.
+- **`stuck`** — a single `(file, title, body)` finding key appeared in **three consecutive review turns** (from either reviewer, counted across both sides — the streak is a property of the finding, not of the reviewer who raised it). Duet does not double the stuck threshold because the failure mode is the same: the implementer cannot satisfy the criticism after two prior fix attempts; the third repeat justifies escalation. **Recovery asymmetry under M8b's Claude-only M7 ladder (§17.5):** the driver records which side's most-recent non-empty implement turn preceded the stuck streak — Claude-side or Codex-side — and surfaces that hint by writing one line to the worker's log file (`.ccx/workers/T-<id>.log`) **immediately before** calling `chat_close`, formatted exactly as `M8B_STUCK_SIDE: claude` or `M8B_STUCK_SIDE: codex` (one literal line, no trailing punctuation). The supervisor's §P2.5 stuck classifier — which already opens `meta.log_path` for triage — tails the last ~20 log lines on every `stuck` closure and scans for that token; presence → record `stuck_side` in `LAST_SIGNAL_ON_BLOCK`'s metadata alongside the existing signal value, absence → treat as `stuck_side=unknown` (a non-duet worker, or an old log). The chat broker's `chat_close` tool surface and recent-closures ring (`{sessionId,cwd,branch,label,status,at}`) stay unchanged — log-tail is the existing channel for worker-internal state the supervisor needs at block time, used by every block-handler since M5's `stuck-recovery-failed` notes path. Supervisor's §15 ladder bump still fires on every `stuck` exit, but only meaningfully escalates Claude-side stuck (a stronger Claude rung produces different code on Claude's implement turns). A **Codex-side stuck** would re-run with the same Codex default and most likely repeat the same `stuck` exit until `--max-attempts` is exhausted — explicitly an M8b limitation, tracked in §17.11 for M9 follow-up where the Codex side gets a ladder of its own or a separate `stuck-codex` block path. Until then, the human who sees a `stuck_side=codex` annotation in supervisor's Discord lifecycle event (§19.3) should disable duet for that task and re-dispatch single-implementer rather than re-trying duet.
 - **`budget-exhausted`** — one **duet cycle** equals one implement+review turn-pair (two turns total); `--loops N` caps the worker at N such cycles. This matches the non-duet semantics where "one cycle = one impl + one review" — duet does not redefine the unit, it just alternates which side runs which turn. `--loops 3` therefore allows 3 impl + 3 review turns total (mixed Claude / Codex), not 3 full 4-turn alternations. Supervisor's §15 ladder treats this exit as `cycle-cap` (same-tier retry). **Minimum `--loops` under `--duet`:** because §17.4's convergence rule requires two consecutive approvals from different reviewers (≥3 review turns in the worst case where the first review approves and one empty implement turn intervenes), `--duet --loops 1` cannot possibly converge to `approved`. The duet driver MUST therefore reject `--duet` with `--loops < 2` at argument-parse time with `--duet requires --loops >= 2 (convergence needs two reviewer approvals from different reviewers)`. T-3's arg-parse contract picks this up alongside the `--codex-first` validation in §17.3.
 - **`aborted`** / **`error`** — unchanged. `aborted` covers cancellation (loop.md cancellation semantics); `error` covers Codex companion crash (§17.8), Agent spawn failure (§17.7), or any uncaught exception in the duet driver.
 
@@ -889,11 +889,148 @@ Deliberately deferred to M9 so the M8b scope stays implementer-loop-only:
 
 ---
 
-## 18. Pre-M6 hotfixes and follow-ups (from e2e 2026-04-18)
+## 18. M9 — Customer-mode invisibility
+
+Status: proposed (2026-05-24). Touches: every command file under `plugins/ccx/commands/`, plus the verifier shipped in T-6 and the inspection helpers shipped in T-5. SSOT for the algorithm; M7 (§15) / M8a (§16) / M8b (§17) are the depth template.
+
+### 18.1 Motivation
+
+ccx today leaves heavy traces in any repo it touches:
+
+- a `.ccx/` directory in the worktree (briefs, worker logs, audit JSONL, recovery sidecars),
+- `BOARD.md` at the repo root,
+- `ccx/T-X` worker branches that survive into merge commits as `Merge branch 'ccx/...'`,
+- `T-X:` / `supervisor: dispatch` / `supervisor: update board` commit subjects mixed into product history,
+- and brief / BOARD edits sweeping into the same commits as product changes.
+
+This pattern is fine in this repo (it is dogfood — the ccx narrative *is* the product) but it is unacceptable in a customer's repo, where the user expects their git log to be indistinguishable from one written by hand. M9 plugs every leak vector by relocating tool state outside the working tree (T-1, T-2), forcing commit / merge hygiene (T-3, T-4), shipping inspection helpers + a dogfood opt-in flag (T-5), and adding a verifier that gates merges if any leak is detected (T-6).
+
+M9 is treated as a **contract**, not a feature set. The six invariants below are checked automatically by `ccx verify` (T-6); a violation blocks the supervisor's pre-merge dry-run and the worker retries with a corrected message.
+
+| # | Invariant | Enforced by |
+|---|---|---|
+| 1 | The user's working tree contains no `.ccx/` directory or other ccx-owned files. | T-1 (state relocation); T-2 (worktree relocation); T-6 verifier |
+| 2 | The user's `.gitignore` (committed) contains no ccx-related entries. | T-2; T-6 verifier |
+| 3 | No commit subject or body on worker branches or new integration commits contains ccx tooling markers (`T-N:` prefix, `supervisor:` subjects, `ccx/` branch markers). Single exception: opt-in Git trailer `Ccx-Task: T-X` when `ccx.commit.trailer = true`, default false. | T-3; T-6 verifier |
+| 4 | Mainline commits contain no merge commit whose first parent matches `Merge branch 'ccx/...'`. Default merge strategy is squash; merge-commit strategies gated behind `ccx.dogfood = true`. | T-4; T-6 verifier |
+| 5 | After a worker finishes, no `ccx/T-X` branch ref remains. | T-2 (cleanup); T-4 (squash semantics); T-6 verifier |
+| 6 | The user's `.claude/`, `CLAUDE.md`, `.claude/settings.json`, `AGENTS.md` files are untouched by ccx unless explicitly opted in. | T-3; T-6 verifier |
+
+T-1 enables invariant 1 (no `.ccx/` in the working tree) by relocating every ccx state file out of `REPO_ROOT` in customer mode. This subsection (§18.2–§18.7) is the SSOT for that relocation; the other M9 tasks add subsections (§18.8 reserves the slots).
+
+### 18.2 State path resolver — algorithm
+
+All ccx state — `BOARD.md`, per-task briefs, worker logs, M3 audit JSONL, M4 recovery sidecars — lives under a single `STATE_DIR` resolved once at the top of `/ccx:supervisor` Phase P0 (and at the top of `/ccx:plan` Phase 0). `plugins/ccx/commands/supervisor.md`'s "State path resolver" section is the operational mirror of this subsection and MUST stay in lockstep with it.
+
+Resolution algorithm (first match wins; evaluate top-to-bottom):
+
+1. **`$CCX_DATA_HOME` env var.** If set and non-empty, `STATE_DIR = $CCX_DATA_HOME` verbatim — no `<repo-key>` suffix is appended. Operator-level escape hatch for tests (`CCX_DATA_HOME=/tmp/ccx-test-<run-id>`) and for users who want a single shared state root across multiple repos.
+2. **Dogfood short-circuit.** `git config --get --type=bool ccx.dogfood` returning `true` → `STATE_DIR = REPO_ROOT/.ccx/`. The flag must be set explicitly per-repo via `git config ccx.dogfood true`; there is no global override and no auto-detection from repo name. This is the only mode in which a `.ccx/` directory legitimately appears in the working tree, and `ccx verify` (T-6) refuses to bless any other repo that carries one.
+3. **`$XDG_DATA_HOME`.** If set and non-empty → `STATE_DIR = $XDG_DATA_HOME/ccx/<repo-key>/`.
+4. **Platform default.** Linux (`uname -s` returns `Linux`) → `STATE_DIR = ~/.local/share/ccx/<repo-key>/`. macOS (`uname -s` returns `Darwin`) → `STATE_DIR = ~/Library/Application Support/ccx/<repo-key>/`. Windows is out of scope for M9 (deferred jointly with the broader Claude Code Windows story).
+
+The XDG branch and the dogfood branch are mutually exclusive: a `true` dogfood flag short-circuits *before* any XDG lookup, so a customer who happens to set `ccx.dogfood = true` while `$XDG_DATA_HOME` is also set still gets `REPO_ROOT/.ccx/`. `$CCX_DATA_HOME` overrides both — operators running test harnesses against this repo can isolate state without touching the dogfood config. The override precedence is deliberate: developer-friendly knobs (`$CCX_DATA_HOME`) above per-repo knobs (`ccx.dogfood`) above environment defaults (`$XDG_DATA_HOME`) above platform defaults.
+
+**Why `$XDG_DATA_HOME` and not `$XDG_CACHE_HOME`.** Board state is data, not cache. A cache directory is one a tool can safely delete to free space; `BOARD.md`, briefs, worker logs, and audit JSONL collectively constitute the operator's working memory across supervisor runs. Recovery from accidental eviction is technically possible (re-running `/ccx:plan` regenerates the BOARD; the workers' branches still exist) but lossy (the audit history disappears and any in-flight `stuck-recovery-failed` sidecars vanish). Treat ccx state as `$XDG_DATA_HOME` material throughout.
+
+**Why a `<repo-key>` suffix.** A single user has many repos and a host-global broker (the ccx-chat singleton, §15.4); collapsing all of them into a single `~/.local/share/ccx/` directory would let a stuck task in repo A overwrite a worker log in repo B via filename collision (`T-1.log` from both runs would clash). Keying every state subdirectory by repo identity removes the collision class entirely, at the cost of a one-time directory creation per repo. The 7-char SHA-256 truncation matches Git's short-SHA convention and keeps the path readable in shell prompts.
+
+### 18.3 `<repo-key>` derivation
+
+Deterministic — fresh clones of the same upstream resolve to the same `<repo-key>` modulo `$HOME`, so a contributor on machine A and a contributor on machine B operating on the same upstream see the same logical state location (modulo whose disk it's on). Algorithm:
+
+1. If `git remote get-url origin` exits 0 and returns a non-empty URL → `<repo-key> = <basename>-<sha256-7>` where the SHA-256 is computed over the URL string (raw bytes, NO trailing newline, NO normalization — case, scheme, and `.git` suffix are part of the input verbatim so two URLs that resolve to the same upstream via redirects still get different keys) and truncated to its first 7 lowercase hex chars. `<basename>` is the `basename` of `REPO_ROOT` lowercased. Example: a repo at `~/Code/MyProject` with `origin = git@github.com:will/myproject.git` resolves to `<repo-key> = myproject-a3f9b2c`.
+2. Else if `git remote` lists at least one remote → use the URL of the **first remote in `git remote`'s output order** (which is alphabetical for git ≥ 2.20), same `<basename>-<sha256-7>` shape. Documented here so a fork with `upstream` set but `origin` missing — a legitimate pattern on private GitHub forks — still produces a stable key.
+3. Else (no remotes — purely-local repo, never pushed) → `<repo-key> = <basename>-local-<sha256-7>` where the hash is over `realpath(REPO_ROOT)`. The `-local-` infix is load-bearing: it makes the local-only nature obvious to a human listing `$XDG_DATA_HOME/ccx/`, and it ensures two clones at different absolute paths produce two distinct state directories (correct behaviour — they're independent worktrees).
+
+The 7-char truncation has a collision risk of approximately 1 in 268M between two unrelated repos that also share a `<basename>`. The failure mode is two repos' state co-located in one directory, which surfaces immediately as confused board state (two BOARDs trying to be the same file) and is recoverable by setting `$CCX_DATA_HOME` per-repo. We accept the risk on the same grounds Git accepts short-SHA collisions: rare enough to ignore in practice, recoverable when hit.
+
+**Why not just hash the absolute path** in every case (skipping the remote URL)? Two reasons. First, the same upstream cloned twice on the same machine — a common workflow when a developer keeps a "stable" clone and a "wip" clone — would produce two distinct state directories, splitting the operator's working memory in half. Second, two contributors on the same upstream would never share a logical reference frame ("the T-12 log is at `<repo-key>/workers/T-12.log`") because their absolute paths differ. Hashing the remote URL keeps the logical reference shared while preserving correctness for the local-only fallback.
+
+**Why not hash the project's working-tree contents** (a Merkle-style key)? Tempting but wrong: any commit advances the hash, so every push would invalidate the state directory. Remote URL is the right level: it changes only on `git remote set-url`, which is rare and operator-intentional, and it captures the identity of the project rather than its current state.
+
+### 18.4 Configuration surface — `git config` keys
+
+M9 introduces four configuration keys, all read via `git config --get`. They are per-repo (no global defaults are honoured) so different repos on the same machine can opt in to different modes:
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `ccx.dogfood` | bool | `false` | When `true`, `STATE_DIR = REPO_ROOT/.ccx/` (state lives in the working tree), the supervisor's `supervisor:` commit subjects are retained, and `ccx verify` accepts `.ccx/` + `.ccx-config` as legitimate. Used by this repo only. |
+| `ccx.commit.trailer` | bool | `false` | When `true`, T-3 (commit hygiene) appends an opt-in `Ccx-Task: T-X` Git trailer to worker-authored squash commits so an operator can grep for ccx provenance after the fact. Default off — invariant 3 forbids ccx markers unless explicitly opted in. |
+| `ccx.merge.strategy` | enum | `squash` | T-4 (merge strategy) honours `squash` (default; produces a single supervisor-authored squash commit per task, no `ccx/...` merge metadata) or, only when `ccx.dogfood = true`, `no-ff` / `ff` for dogfood traces. Customer mode is squash-or-fail. |
+| `ccx.paranoid` | bool | `false` | When `true`, T-6 (`ccx verify`) elevates every warning to a hard error. Default off — non-paranoid mode reserves the hard-error budget for invariants 1–6 and treats incidental drift (stale `Ccx-Task:` trailers on rebased commits, etc.) as warnings. |
+
+A repo may additionally commit a `.ccx-config` file as **dogfood-only metadata** documenting the operator's defaults (similar to `.editorconfig`). `ccx verify` treats `.ccx-config` as the single permitted dogfood-only filesystem exception and refuses it in non-dogfood checkouts. A customer's repo MUST NEVER receive a ccx-owned config file; T-3 / T-6 enforce this on the writer and reader side respectively.
+
+### 18.5 First-run UX
+
+On first resolution per run, the resolver:
+
+1. `mkdir -p`s `STATE_DIR`, `STATE_DIR/tasks/`, `STATE_DIR/workers/`, `STATE_DIR/supervisor-audit/`. `STATE_DIR/BOARD.md` and `STATE_DIR/supervisor-recovery-*.txt` are NOT pre-created — their absence is a meaningful signal (no BOARD seeded → `/ccx:plan` not run; no recovery sidecar → no failed batch commit) and the writers (`/ccx:plan` Phase 2 for BOARD; supervisor §P2.4 for recovery) call `Write` directly when they fire.
+2. Emits ONE line to stderr: `ccx state: <STATE_DIR>`. Fire-and-forget — must not crash on a closed-fd stderr (workers spawn the supervisor under `claude -p` and the stderr pipe is owned by the parent). Logged exactly once per run, regardless of how many later phases reference `STATE_DIR`.
+3. Returns `STATE_DIR` to the caller. The caller caches it in a run-scope variable and re-reads that variable; the resolver is not re-invoked.
+
+No interactive prompt. No tty check. The single stderr line is enough audit signal — a `claude -p` runner can pipe stderr to its supervisor log if it cares — and avoids the "first-run wizard" failure mode where a non-TTY context (CI, `claude -p` invocation, headless server) hangs forever on a prompt that nobody answers.
+
+### 18.6 Where state files live, and what gets `git`-tracked
+
+In customer mode (`STATE_DIR` outside `REPO_ROOT`):
+
+| File | Absolute path | Git-tracked? |
+|---|---|---|
+| BOARD | `<STATE_DIR>/BOARD.md` | No — outside the worktree. |
+| Per-task brief | `<STATE_DIR>/tasks/T-<id>.md` | No — outside the worktree. |
+| Worker log | `<STATE_DIR>/workers/T-<id>.log` | No — outside the worktree. |
+| Audit JSONL | `<STATE_DIR>/supervisor-audit/<RUN_ID>.jsonl` | No — outside the worktree. |
+| Recovery sidecar | `<STATE_DIR>/supervisor-recovery-<RUN_ID>.txt` | No — outside the worktree. |
+
+In dogfood mode (`STATE_DIR == REPO_ROOT/.ccx/`):
+
+| File | Absolute path | Git-tracked? |
+|---|---|---|
+| BOARD | `<REPO_ROOT>/.ccx/BOARD.md` | Yes — committed by `/ccx:plan` Phase 3 and `/ccx:supervisor` Step D. |
+| Per-task brief | `<REPO_ROOT>/.ccx/tasks/T-<id>.md` | Yes — committed by supervisor Step A step 3. |
+| Worker log | `<REPO_ROOT>/.ccx/workers/T-<id>.log` | Optionally — typically `.gitignore`d in the dogfood repo to avoid log churn; the audit JSONL is the authoritative trail. |
+| Audit JSONL | `<REPO_ROOT>/.ccx/supervisor-audit/<RUN_ID>.jsonl` | Yes — staged alongside BOARD in Step D's batch commit. |
+| Recovery sidecar | `<REPO_ROOT>/.ccx/supervisor-recovery-<RUN_ID>.txt` | Yes when the merge-commit-failed branch fires; cleaned up on Step D success. |
+
+The two columns differ only in the second one — customer mode is "write the file, never git it"; dogfood mode is "write the file and git it". The supervisor's git operations on `STATE_DIR` paths (Step A step 3 brief commit, Step A step 8 dispatch commit, Step D batch commit, §P2.5 step 4 brief revision commit) are gated on a conjunction predicate: `IS_DOGFOOD = (STATE_DIR == REPO_ROOT/.ccx/) AND (git config --get --type=bool ccx.dogfood == true)`. A generic `is_subpath(STATE_DIR, REPO_ROOT)` is NOT used — that loose form would mark an environment override like `CCX_DATA_HOME=$REPO_ROOT/.ccx` as dogfood even without the explicit `git config ccx.dogfood true` opt-in, silently writing state into a customer's working tree. The commands additionally STOP at resolver time when `STATE_DIR` lies inside `REPO_ROOT` without the dogfood flag set (the "In-repo `STATE_DIR` requires explicit dogfood opt-in" rejection in supervisor.md's resolver section). T-3 (commit hygiene) hardens this gate, defines the customer-mode write-only protocol, and removes the legacy `supervisor:` commit subjects entirely. T-1 (this milestone-section) establishes the gate's existence so an early customer-mode run cannot accidentally create the commits T-3 is meant to forbid.
+
+### 18.7 Migration from pre-M9 state
+
+Dogfood repos (this one) — no migration needed; `git config ccx.dogfood true` short-circuits to `REPO_ROOT/.ccx/`, which is exactly where state lived pre-M9. The one nuance: `BOARD.md` historically lived at `REPO_ROOT/BOARD.md`, not `REPO_ROOT/.ccx/BOARD.md`. The dogfood resolver returns `STATE_DIR/BOARD.md = REPO_ROOT/.ccx/BOARD.md`, so the existing root-level BOARD must be moved to `.ccx/BOARD.md` once. T-1 does NOT perform this move (out of scope per the brief — only `plugins/ccx/commands/*.md` and `docs/supervisor-design.md` are touched); the operator runs `git mv BOARD.md .ccx/BOARD.md` and commits, OR keeps the root BOARD and accepts that the next supervisor run will fail P0 step 4's existence check until they do. Manual one-time migration; flagging it here so the dogfood operator knows what to do on first M9 run.
+
+Customer repos with no prior ccx history — no migration needed; the resolver creates the state directory on first access. Customer repos with a stray `.ccx/` directory from pre-M9 experimentation should `git rm -r .ccx/` and commit before running M9 commands; otherwise T-6's verifier blocks the next merge.
+
+### 18.8 Scope split across M9 tasks
+
+T-1 (this subsection's depth) establishes the resolver, the configuration surface, and the customer-mode write contract. The remaining M9 tasks each get a sibling subsection under §18 once they land:
+
+- **§18.2.1 (T-2 — worktree relocation):** worker worktrees in customer mode live alongside `<STATE_DIR>` rather than as `<REPO_ROOT>-<id>` siblings, so the user's repo tree stays free of `*-T-<id>` directories. Hooks into the resolver via a `STATE_DIR/worktrees/<id>/` subdirectory. T-2's filing.
+- **§18.2.2 (T-3 — commit hygiene):** removes `T-<id>:` / `supervisor:` commit subjects in customer mode, introduces the `Ccx-Task: T-X` trailer for opt-in provenance, and finalizes the `IS_DOGFOOD` gate on every supervisor-authored commit. T-3's filing.
+- **§18.2.3 (T-4 — merge strategy):** documents the `ccx.merge.strategy` config key, the squash-only default for customer mode, and the dogfood-gated `no-ff` escape. T-4's filing.
+- **§18.2.4 (T-5 — inspection helpers + dogfood opt-in flag):** documents `/ccx:where`, `/ccx:board`, `/ccx:tasks`, `ccx link` / `ccx unlink`, and the operator-facing surface around `ccx.dogfood`. T-5's filing.
+- **§18.2.5 (T-6 — `ccx verify` + customer-mode README section):** the invariant table above operationalized as a script, plus the documentation hand-off to the README. T-6's filing.
+
+Each subsequent M9 task amends THIS section (§18) rather than starting a new top-level section; the design doc keeps M9 as a single block so a reader can grasp the whole contract in one scroll.
+
+### 18.9 Out of scope for M9
+
+Deliberately deferred to a later milestone:
+
+- **Sharing `STATE_DIR` across hosts** (e.g. a team-wide ccx state directory on a network mount). Out of scope because it conflicts with the design's per-operator working-memory model and would need a locking primitive the broker does not yet have.
+- **Windows support.** The resolver's platform default branch covers Linux and macOS; Windows is deferred jointly with the broader Claude Code Windows path-handling work.
+- **A migration helper that moves a pre-M9 `.ccx/` directory into `STATE_DIR` automatically.** The customer-mode case is "delete pre-existing experimentation"; the dogfood case is a one-time `git mv`. Neither needs scripting; an inspection helper that prints the diagnosis is in T-5's scope and suffices.
+- **Encrypted state at rest.** Worker logs and briefs can carry sensitive prompt text. M9 takes the position that `$XDG_DATA_HOME` is the right protection boundary (filesystem permissions inherited from the user's home directory) and defers any tool-level encryption to a future security-hardening milestone.
+- **Multi-user `$STATE_DIR`.** If two users on the same host want to drive the same ccx repo, they each get their own `$STATE_DIR` under their own `$HOME`. The broker is host-global (one per host); coordinating two operators' state directories with one broker is left open for the supervisor session-resume work that is already deferred (§20).
+
+---
+
+## 19. Pre-M6 hotfixes and follow-ups (from e2e 2026-04-18)
 
 Items surfaced during the first end-to-end run against `/tmp/ccx-e2e`. Each scoped tightly so they ship independently or batched with M6. Do NOT pick these up until the e2e sandbox is cleaned or rebuilt — the current `/tmp/ccx-e2e/` has a half-merged dispatch that should be wiped before re-testing.
 
-### 18.1 `--squash` merge policy (replaces `--no-ff`) — shipped 2026-04-18
+### 19.1 `--squash` merge policy (replaces `--no-ff`) — shipped 2026-04-18
 
 **Why:** §10 picked `--no-ff` on the assumption workers land multi-commit branches worth preserving as a group. In practice `/ccx:loop`'s Phase 4 squashes cycles into one final commit, so a task branch has exactly one commit — and `--no-ff` adds a parent-only merge commit that carries **zero new tree changes**, just a graph node. With `--squash`, one task = one supervisor-authored commit on integration: cleaner history with the same audit surface.
 
@@ -904,7 +1041,7 @@ Items surfaced during the first end-to-end run against `/tmp/ccx-e2e`. Each scop
 - design doc §10 — update policy + rationale.
 - memory M4 note — `--no-ff --no-commit` → `--squash`.
 
-### 18.2 Step C sleep robustness — shipped 2026-04-18 (option B)
+### 19.2 Step C sleep robustness — shipped 2026-04-18 (option B)
 
 **Why:** Spec says `sleep 3`. First e2e run had supervisor-Claude run `sleep 60` instead (LLM deviated from the literal instruction — model inferred "60s is more reasonable when waiting on LLM workers"). Claude Code 2.1.x blocks long standalone leading sleeps, so the scheduling loop hung at Step C and workers' completions were never drained.
 
@@ -914,7 +1051,7 @@ Items surfaced during the first end-to-end run against `/tmp/ccx-e2e`. Each scop
 
 Recommend B — it's the same amount of prose to document, more robust to LLM deviation, and measurably reduces wake-ups on quiet iterations.
 
-### 18.3 Supervisor Discord presence — shipped 2026-04-18 (`--chat` flag)
+### 19.3 Supervisor Discord presence — shipped 2026-04-18 (`--chat` flag)
 
 **Why:** Workers post to Discord via their `chat_send` calls, so the user sees worker chatter. Supervisor itself has no Discord route, so from Discord you cannot tell "a supervisor run started in repo X", "it dispatched T-1 and T-2", "T-1 merged / T-2 blocked", or "the run ended with 3 merged". That's the orchestration timeline the user actually wants to watch, and it's entirely missing.
 
@@ -928,7 +1065,7 @@ Recommend B — it's the same amount of prose to document, more robust to LLM de
 
 **Mechanism:** Supervisor registers its own ccx-chat session at P0 with a label like `[supervisor] <repo_basename>`. Uses `chat_send` only (no asks, nothing queues). Gated behind a `--chat` flag on `/ccx:supervisor` to mirror worker semantics. When `backend: "supervisor"`, the supervisor's own sends fall through to the Discord fallback — already plumbed in `adapters/supervisor.mjs`.
 
-### 18.4 Repo-name prefix on all ccx-chat messages — shipped 2026-04-18
+### 19.4 Repo-name prefix on all ccx-chat messages — shipped 2026-04-18
 
 **Why:** User runs many concurrent ccx sessions across different repos (`ccx-loop`, `gold-digger-*`, etc.). Current Discord messages carry session label + branch but not the repo. Prefix disambiguates.
 
@@ -942,7 +1079,7 @@ Non-goal: re-rendering the branch as a prefix (already in session label, would d
 
 ---
 
-## 19. Open questions
+## 20. Open questions
 
 - **Broker singleton vs supervisor scope.** The broker is global (one per host). Can two simultaneous supervisor sessions coexist? Probably not on MVP — require one supervisor at a time, enforce with a lock file.
 - **What if the human closes the supervisor session mid-run?** Workers keep running (they're independent processes). On resume (`/ccx:supervisor --resume`), re-read `BOARD.md` and reconcile by checking branch HEADs, `.ccx/workers/*.log` tails, and `chat_close` records. Stretch goal.
