@@ -51,11 +51,11 @@ No other flags for M6. Direction-only updates and row-editing are manual — the
 ## Phase 0: Pre-check
 
 1. Resolve repo root: `REPO_ROOT="$(git rev-parse --show-toplevel)"`. If not inside a git repo, STOP with `/ccx:plan must be run inside a git repository`.
-1a. **Resolve `STATE_DIR` and `IS_DOGFOOD`** per `plugins/ccx/commands/supervisor.md` → "State path resolver" (SSOT — same algorithm; M9). Compute `BOARD_PATH = STATE_DIR/BOARD.md` (absolute). Compute `IS_DOGFOOD` as the **conjunction**: `(STATE_DIR == REPO_ROOT/.ccx/)` AND `(git config --get --type=bool ccx.dogfood == true)`. Concretely (identical to supervisor.md's P0 step 1a — both commands MUST use the same string-trim normalization so the resolver's trailing-slash output does not silently misroute one and not the other):
+1a. **Resolve `STATE_DIR` and `IS_DOGFOOD`** per `plugins/ccx/commands/supervisor.md` → "State path resolver" (SSOT — same algorithm; M9). Compute `BOARD_PATH = STATE_DIR/BOARD.md` (absolute). Compute `IS_DOGFOOD` as the **conjunction**: `(STATE_DIR == REPO_ROOT/.ccx/)` AND `(git config --local --get --type=bool ccx.dogfood == true)` — `--local` matches supervisor.md and the T-5 helpers; see §18.4 of the design doc for why every ccx.* read is local-scope. Concretely (identical to supervisor.md's P0 step 1a — both commands MUST use the same string-trim normalization so the resolver's trailing-slash output does not silently misroute one and not the other):
    ```bash
    STATE_DIR_NORM="${STATE_DIR%/}"
    REPO_ROOT_DOGFOOD="${REPO_ROOT%/}/.ccx"
-   DOGFOOD_FLAG="$(git config --get --type=bool ccx.dogfood 2>/dev/null || echo false)"
+   DOGFOOD_FLAG="$(git config --local --get --type=bool ccx.dogfood 2>/dev/null || echo false)"
    if [ "$STATE_DIR_NORM" = "$REPO_ROOT_DOGFOOD" ] && [ "$DOGFOOD_FLAG" = "true" ]; then
      IS_DOGFOOD=true
    else
@@ -274,7 +274,8 @@ After a successful commit (dogfood) or a successful `Write` (customer mode), pri
    Next steps:
      1. Review <BOARD_PATH>. Edit any draft row (title, scope.include, depends_on, notes) as needed.
         (BOARD lives outside the working tree at <BOARD_PATH> — edits to it are not under git
-         and never need staging or committing.)
+         and never need staging or committing. Use `/ccx:board` from the repo to re-open it in
+         $EDITOR later, or `/ccx:where` to print the resolved state path.)
      2. For each task you want to dispatch, change `status: draft` to `status: pending`.
      3. Make sure the rest of your working tree is clean — `/ccx:supervisor` P0 step 3 still
         refuses to start on a dirty tree even though BOARD itself is exempt. Commit or stash
@@ -283,6 +284,8 @@ After a successful commit (dogfood) or a successful `Write` (customer mode), pri
      4. Run `/ccx:supervisor` to dispatch the pending tasks.
 
    To add more tasks later: `/ccx:plan --append "<prompt>"` or `/ccx:plan --append --from <path>`.
+   To inspect the queue without opening BOARD: `/ccx:tasks` (lists tasks + status; `--status` filters).
+   To pin this repo's state directory to a readable name: `/ccx:link --name <readable>`.
    ```
 
    In customer mode the BOARD itself is not in the working tree, so edits to it never trip the supervisor's clean-tree gate; everything ELSE in the working tree still does, including the `--from <path>` source document the user just wrote. The footer surfaces that explicitly so the headline `--from` workflow does not break at the supervisor handoff. Substitute the resolved `<BOARD_PATH>` literally so the user knows exactly which file to edit.
