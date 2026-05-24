@@ -362,7 +362,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - README.md
       - docs/supervisor-design.md
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on:
     - T-1
@@ -371,7 +371,10 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
     - T-4
     - T-5
   brief: .ccx/tasks/T-6.md
-  attempts: 0
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-6"
+  branch: "ccx/T-6"
+  started_at: "2026-05-24T19:34:33Z"
   notes: |
     The contract enforcer. Implements `ccx verify` as a shell script
     that checks all six M9 invariants and is invoked by the
