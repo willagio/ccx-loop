@@ -347,11 +347,11 @@ Pre-M6 §15.3. Registers the supervisor's own ccx-chat session so Discord watche
    2. `error` — an uncaught supervisor error reached the `finally` block.
    3. `stuck` — ANY task ended in a stuck-flavored outcome. A task is stuck-flavored when either of these holds:
       - Its `exit_status` is `stuck-aborted` (unambiguously reached only from the opus/max human-guidance "Abort" path — always stuck).
-      - Its `exit_status` is one of `stuck-recovery-failed`, `stuck-cleanup-failed`, or `attempts-exhausted` AND `LAST_SIGNAL_ON_BLOCK[<task_id>] == "stuck"`. These three exit_statuses can each be reached from both stuck-driven and cycle-cap-driven code paths — the brief-revision-commit-failed case is opus/max-only and always stuck, but the cleanup-failed case fires from every re-dispatch path (stuck bump, cycle-cap retry, opus/max human-guided), and attempts-exhausted fires from both automatic paths. The `LAST_SIGNAL_ON_BLOCK` lookup is the sole input that distinguishes the two flavours at session-close time, so the session's stuck nature is preserved only when the final signal leading to the block was genuinely `"stuck"`. Pure cycle-cap drains that happen to hit `stuck-cleanup-failed` are correctly left to rule 5 (`completed`).
+      - Its `exit_status` is one of `stuck-recovery-failed`, `stuck-cleanup-failed`, or `attempts-exhausted` AND `LAST_SIGNAL_ON_BLOCK[<task_id>] ∈ {"stuck", "leak"}`. These three exit_statuses can each be reached from stuck-driven, cycle-cap-driven, AND leak-driven (M9 T-6) code paths — the brief-revision-commit-failed case is opus/max-only and always stuck, but the cleanup-failed case fires from every re-dispatch path (stuck bump, cycle-cap retry, opus/max human-guided, leak recovery), and attempts-exhausted fires from every automatic path. The `LAST_SIGNAL_ON_BLOCK` lookup is the sole input that distinguishes the flavours at session-close time, so the session's stuck nature is preserved only when the final signal leading to the block was genuinely `"stuck"` or `"leak"` (both are workflow-blocking conditions that warrant the operator's attention — a stuck-flavored close on `--chat` triggers the same Discord lifecycle messaging). Pure cycle-cap drains that happen to hit `stuck-cleanup-failed` are correctly left to rule 5 (`completed`).
    4. `approved` — every dispatched task ended `merged`, and nothing is in flight or blocked.
    5. `completed` — the default for any other mixed merged/blocked outcome, including `attempts-exhausted` or `stuck-cleanup-failed` whose `LAST_SIGNAL_ON_BLOCK` was `"cycle-cap"` (a pure cycle-cap drain with no stuck involvement), plus `merge-*`, `spawn-error`, `no-commit`, `loop-flags-rejected` (M8b §17.9 — deterministic brief-validation rejection; never stuck-flavored regardless of which brief was rejected), etc.
 
-   Because `RUNNING` is drained into `BLOCKED_IDS` or `MERGED_IDS` by the time P3 runs, the `last_signal` values required by rule 3 must be captured BEFORE Step B step 5 removes the task from `RUNNING`. Maintain a per-run `LAST_SIGNAL_ON_BLOCK: { task_id -> "stuck" | "cycle-cap" }` map populated alongside every BOARD-row stash where the exit_status is in `{attempts-exhausted, stuck-recovery-failed, stuck-cleanup-failed}` (§P2.5 step 2, step 4's recovery-failed branch, and step 5's cleanup-failed branch each copy `signal` into it at that moment). Tasks whose exit_status is `stuck-aborted` do NOT need an entry — rule 3's first bullet classifies them directly. P3 reads this map, not `RUNNING`, when computing rule 3.
+   Because `RUNNING` is drained into `BLOCKED_IDS` or `MERGED_IDS` by the time P3 runs, the `last_signal` values required by rule 3 must be captured BEFORE Step B step 5 removes the task from `RUNNING`. Maintain a per-run `LAST_SIGNAL_ON_BLOCK: { task_id -> "stuck" | "cycle-cap" | "leak" }` map populated alongside every BOARD-row stash where the exit_status is in `{attempts-exhausted, stuck-recovery-failed, stuck-cleanup-failed}` (§P2.5 step 2, step 4's recovery-failed branch, step 4a's leak-revise-commit-failed branch, and step 5's cleanup-failed branch each copy `signal` into it at that moment). Tasks whose exit_status is `stuck-aborted` do NOT need an entry — rule 3's first bullet classifies them directly. P3 reads this map, not `RUNNING`, when computing rule 3.
 
 If `--chat` was unset by step 1's tool-availability check, all seven items above are no-ops.
 
@@ -610,11 +610,161 @@ For each `(task_id, meta)` in `RUNNING`:
      :
    fi
 
+   # M9 T-6 — ccx verify pre-merge gate. Run the contract enforcer BEFORE
+   # the strategy dispatch so a leak block fires identically across squash /
+   # rebase / dogfood-merge (T-4's own merge-boundary regex is squash-only;
+   # T-6 covers every invariant under every strategy). The script lives at
+   # `plugins/ccx/scripts/verify.sh` and exits 0 on a clean candidate,
+   # otherwise prints every violation to stderr and exits with the lowest
+   # matching invariant code (10..15) per docs/supervisor-design.md §18.2.9.
+   #
+   # Inputs passed via env var (the script reads from env, not argv, so a
+   # multi-line proposed message lands without shell-quoting hazards):
+   #   REPO              integration checkout (current cwd at this point)
+   #   BASE              the integration tip — pre-merge baseline
+   #   TARGET_REF        ccx/<task_id> — the worker branch being considered
+   #   CCX_DIFF_PATHS    the diff path list for invariant 6 — supervisor
+   #                     resolves it once here so an env-var override in a
+   #                     parent process can't change behavior mid-run
+   #   CCX_PROPOSED_MSG  squash-strategy ONLY — the worker's final commit
+   #                     message that the squash will land verbatim (T-3-
+   #                     processed at worker time, scanned one more time here
+   #                     by invariant 3). For rebase / dogfood-merge this is
+   #                     left empty (the per-commit subjects/bodies in the
+   #                     BASE..TARGET_REF range are scanned directly).
+   #
+   # Non-zero exit → block merge, classify as `leak-<EXIT>` (e.g. `leak-12`),
+   # capture the verifier's stderr verbatim into notes, and route through
+   # §P2.5 step 1's `signal == "leak"` branch (same-tier re-dispatch with
+   # the leak detail injected as a Decisions entry via step 4a). This is
+   # the M9 closer for the "worker regressed past T-3's retry budget"
+   # failure mode — instead of blocking the operator on a manual fix, the
+   # supervisor auto-revises and retries within the existing tier budget.
+   SCRIPT_PATH="<plugin_root>/scripts/verify.sh"
+   case "$MERGE_STRATEGY" in
+     squash) VERIFY_PROPOSED_MSG="$(git log -1 --format=%B "ccx/<task_id>")" ;;
+     *)      VERIFY_PROPOSED_MSG="" ;;
+   esac
+   VERIFY_DIFF_PATHS="$(git diff --name-only "<INTEGRATION>...ccx/<task_id>")"
+   # Peer-branch list — every `ccx/T-*` branch the supervisor knows about
+   # OTHER than the candidate. Two sources are unioned: (a) every other
+   # in-flight worker's ref (tasks in `RUNNING` other than the candidate),
+   # and (b) every preserved-blocked task's ref (tasks in `BLOCKED_IDS`
+   # whose exit_status preserves the worker branch — `merge-conflict`,
+   # `merge-aborted`, `merge-commit-failed`, `leak-detected-at-merge`,
+   # `rebase-conflict`, `no-commit`, `error`, plus §P2.5's
+   # `attempts-exhausted` / `stuck-recovery-failed` / `stuck-cleanup-failed`
+   # family). Without (a), `--parallel N>1` candidates fail leak-14 because
+   # siblings counted as stale. Without (b), the FIRST clean candidate
+   # after any earlier task blocked-with-preserved-branch in the same run
+   # would also fail leak-14 — the worker driving the clean candidate has
+   # no way to fix supervisor branch hygiene, so an automatic retry would
+   # burn attempts with misleading "leak" guidance.
+   # `<RUNNING>` = the supervisor's in-memory `RUNNING` map (Step A step 7).
+   # `<BLOCKED_BRANCH_PRESERVING>` = subset of `BLOCKED_IDS` whose stashed
+   # BOARD-row update has an exit_status in the preserve-branch list above
+   # (Step B step 5's branch-deletion contract is the SSOT for that list).
+   # The string is newline-separated `ccx/<task_id>` per entry.
+   VERIFY_PEER_BRANCHES="$( { printf 'ccx/%s\n' $(printf '%s ' "${!RUNNING[@]}");
+                              printf 'ccx/%s\n' $(printf '%s ' "${BLOCKED_BRANCH_PRESERVING[@]}");
+                            } | sort -u | grep -v '^ccx/<task_id>$' || true)"
+   VERIFY_STDERR="$(REPO="$(pwd)" \
+                    BASE="<INTEGRATION>" \
+                    TARGET_REF="ccx/<task_id>" \
+                    CCX_DIFF_PATHS="$VERIFY_DIFF_PATHS" \
+                    CCX_PROPOSED_MSG="$VERIFY_PROPOSED_MSG" \
+                    CCX_PEER_BRANCHES="$VERIFY_PEER_BRANCHES" \
+                    bash "$SCRIPT_PATH" 2>&1 1>/dev/null)"
+   VERIFY_RC=$?
+   # Distinguish leak exits (10..15 — worker-fixable invariant violations)
+   # from infrastructure failures (anything else — bad ref, missing python3,
+   # script not found, script-itself error). Routing an infra failure into
+   # §P2.5's automatic retry would burn attempts on a condition the worker
+   # cannot fix (the worker re-spawns and immediately hits the same broken
+   # supervisor environment), then eventually block as `attempts-exhausted`
+   # with misleading "leak" notes pointing the operator at commit-hygiene
+   # instead of the real environment issue. Fail closed on the supervisor
+   # side instead, with a clear stderr line and STOP_DISPATCHING set so the
+   # operator can fix the environment before re-running.
+   if [ "$VERIFY_RC" -ne 0 ] && { [ "$VERIFY_RC" -lt 10 ] || [ "$VERIFY_RC" -gt 15 ]; }; then
+     # Infrastructure failure — NOT a leak. Treat exactly like a P0 STOP:
+     # log to stderr, write a one-line breadcrumb to
+     # STATE_DIR/supervisor-recovery-<RUN>.txt that lists the failing
+     # task, the verify exit code (2 / 127 / other), and the verifier's
+     # stderr (first 200 chars of VERIFY_STDERR, single-line); set
+     # STOP_DISPATCHING = true so Step A2's slot-fill stops accepting new
+     # pops; classify this task as `merge-aborted` with notes "ccx verify
+     # infrastructure failure: rc=<VERIFY_RC>; <first 200 chars of
+     # VERIFY_STDERR>". The worker branch / worktree are preserved (no
+     # `git branch -D`, no worktree removal — same contract as other
+     # merge-aborted exits). Continue the outer Step B drain loop so
+     # already-RUNNING peers can finish; the loop exits via condition 3
+     # (STOP_DISPATCHING == true AND RUNNING == {}) once the last
+     # in-flight worker drains. Step D persists the BOARD update once
+     # at natural loop exit per its existing contract.
+     #
+     # Fall through to the strategy-dispatch guard below — VERIFY_RC is
+     # non-zero, so the `if [ "$VERIFY_RC" -eq 0 ]` wrapper skips the
+     # `case` block. Then `continue` the outer drain loop.
+     :
+   elif [ "$VERIFY_RC" -ne 0 ]; then
+     # No `git merge` / `git rebase` / `git restore` has run yet — the
+     # integration tree is still in its pre-merge clean state, so there is
+     # NOTHING to roll back here.
+     #
+     # The supervisor MUST execute the following actions in this branch
+     # (the `:` no-op below is a placeholder for the bash literal; the
+     # numbered list IS the algorithmic step the LLM-driven supervisor
+     # performs when this branch fires, the same convention every other
+     # `:` branch in this file uses):
+     #
+     #   1. Record `meta.last_signal = "leak"` and `meta.leak_detail =
+     #      VERIFY_STDERR`, `meta.leak_code = VERIFY_RC` (used by §P2.5
+     #      step 4a's Decisions-entry synthesis below).
+     #   2. Audit: `decision: "leak-recovery"`, `source: "verifier"`,
+     #      `citation: "leak-<VERIFY_RC>; <first 200 chars of
+     #      VERIFY_STDERR, single-line>"`, `reply: null`, `brokerOk: null`.
+     #      Append to the same `STATE_DIR/supervisor-audit/<RUN>.jsonl`
+     #      every other §P2.5 decision lands in.
+     #   3. **Invoke §P2.5 inline with `signal = "leak"`**, reusing the
+     #      same machinery cycle-cap and below-opus/max-stuck exits use
+     #      (step 1 → step 4a → step 2 → step 5 → step 6). §P2.5 owns the
+     #      brief revision (step 4a), worktree teardown (step 5), and
+     #      re-dispatch at the same tier (step 6). DO NOT add the task to
+     #      `BLOCKED_IDS` here — the first re-dispatch is automatic; only
+     #      if §P2.5's own gate (budget exhausted, brief commit failed,
+     #      cleanup failed) declines the retry does the task end up
+     #      blocked, with `exit_status: "attempts-exhausted"` (or
+     #      `stuck-recovery-failed` / `stuck-cleanup-failed`) and
+     #      `LAST_SIGNAL_ON_BLOCK = "leak"`. P0.5 step 7 rule 3 classifies
+     #      that session close as stuck-flavored.
+     #   4. After §P2.5 returns, `continue` the outer Step B drain loop.
+     #      Whatever §P2.5 did — re-dispatch (task stays in RUNNING, fresh
+     #      worktree/shell), block (task removed from RUNNING and BLOCKED_IDS
+     #      updated) — the supervisor MUST NOT touch the strategy dispatch
+     #      below for this iteration; the `if [ "$VERIFY_RC" -eq 0 ]; then`
+     #      wrapper guard around the strategy `case` block makes that
+     #      structurally impossible too (belt-and-braces).
+     #   5. Do NOT set `STOP_DISPATCHING` — a leak regression on one worker
+     #      does not invalidate other workers' merges. The next Step B
+     #      iteration drains whatever §P2.5 left running.
+     #
+     # The `:` below is the shell literal placeholder; the actions in
+     # the numbered list above are what the supervisor executes when
+     # this branch fires.
+     :
+   fi
+
    # M9 T-4 — strategy dispatch. The MERGE_STRATEGY value comes from P0
    # step 1a's resolver; this is the SOLE site where the choice between
    # squash / rebase / merge is materialised. The merge strategy is gated
    # to dogfood mode at startup, so reaching the `merge` branch in customer
-   # mode is impossible — P0 step 1a's STOP would have already fired.
+   # mode is impossible — P0 step 1a's STOP would have already fired. ONLY
+   # reached when the T-6 verify gate above exited 0 — the
+   # `[ "$VERIFY_RC" -eq 0 ]` guard below makes that explicit so a future
+   # refactor cannot silently let a leaking candidate fall through into
+   # the merge primitive.
+   if [ "$VERIFY_RC" -eq 0 ]; then
    case "$MERGE_STRATEGY" in
      squash)
        # --- SQUASH STRATEGY (default, customer + dogfood) ---
@@ -1081,6 +1231,10 @@ except Exception as exc:
        fi
        ;;
    esac
+   fi  # closes the `if [ "$VERIFY_RC" -eq 0 ]; then` wrapper that gates
+       # the strategy dispatch on the T-6 verify gate (added above the
+       # `case "$MERGE_STRATEGY"` block). When the verifier fired non-zero,
+       # the §P2.5 leak-recovery path ran instead of any merge primitive.
    ```
 
    Strategy-specific semantics relevant to the algorithm above:
@@ -1792,7 +1946,7 @@ Step B step 4's sub-classifier routes here when the broker's recent-closures buf
 
 Automatic paths (tier bump, same-tier retry) run without blocking the scheduling loop. Only the `opus/max` human-guidance path blocks on `AskUserQuestion`; that is acceptable because (a) reaching `opus/max` stuck at all is rare, (b) other `RUNNING` workers keep executing as subprocesses while the supervisor waits, and (c) the broker's own auto-escalate timer (60s default) is the safety net for any peer worker that emits a `chat_ask` during the wait.
 
-Inputs: `meta = RUNNING[<task_id>]` (with `tier: int`, `attempts: int`, `last_signal: string|null`, and the other fields from Step A step 7), and `signal ∈ {"stuck", "cycle-cap"}` passed from Step B step 4's sub-classifier.
+Inputs: `meta = RUNNING[<task_id>]` (with `tier: int`, `attempts: int`, `last_signal: string|null`, and the other fields from Step A step 7), and `signal ∈ {"stuck", "cycle-cap", "leak"}` passed from Step B step 4's sub-classifier — OR from Step B step 3's T-6 pre-merge gate (`signal == "leak"` with an additional `leak_detail` string captured from the verifier's stderr).
 
 **Entry bookkeeping.** Before running step 1, set `meta.last_signal = signal` (overwrite). This is the value P3 reads to classify the session close when the task eventually blocks with `attempts-exhausted` — without it, a task whose ladder climb was stuck-driven but whose final exit was in the budget-exhausted block would look indistinguishable from a pure cycle-cap drain at session-close time.
 
@@ -1806,9 +1960,11 @@ Steps 1 and 2 are deliberately ordered **signal dispatch first, budget check sec
 
    - **`signal == "stuck"` AND `meta.tier < len(TIER_LADDER) - 1`** (below `opus/max`) → automatic path with `next_tier = meta.tier + 1` (the cheaper rung could not satisfy Codex, so the next rung gets a shot). NO human prompt, NO brief revision — M7's whole point is to automate this response and reserve the human for end-of-ladder. Continue to step 2 (budget check) → step 5 → step 6.
 
+   - **`signal == "leak"`** (M9 T-6 — Step B step 3's pre-merge `ccx verify` gate fired non-zero) → automatic path with `next_tier = meta.tier` (the model didn't pick a wrong tier; it produced a commit / diff that violated an M9 invariant). Brief revision IS required — the worker has no way to learn what regressed without the verifier's leak detail injected into its next dispatch context. Continue to step 4a (synthesize a Decisions entry from `leak_detail`) → step 2 (budget check) → step 5 → step 6. This is the M9 closer for the "worker regressed past T-3's three-retry budget" failure mode: instead of blocking on operator-driven recovery (the documented path for T-3's `commit-marker-leak` and T-4's `leak-detected-at-merge`), the supervisor revises the brief with the structured leak detail and retries automatically within the existing `--max-attempts` budget. A leak that survives the same-tier retry budget eventually blocks as `attempts-exhausted` with `LAST_SIGNAL_ON_BLOCK = "leak"`, which P0.5 step 7 rule 3 maps onto the stuck-flavored session close.
+
    - **`signal == "stuck"` AND `meta.tier == len(TIER_LADDER) - 1`** (at `opus/max`) → human-guided path. Fall through directly to step 3 (skip step 2 — the budget does NOT gate this branch). `next_tier = meta.tier` regardless of the human's answer (there is no higher rung). The human may pick abort (block `stuck-aborted`), re-dispatch unchanged, or re-dispatch with new Decisions guidance. A human-approved re-dispatch still increments `attempts` on the way out (step 6) — the budget is informational at this point, not enforcing.
 
-2. **Budget check — ONLY on automatic paths** (`signal == "cycle-cap"` OR `signal == "stuck"` below `opus/max`). The opus/max stuck human-guidance path from step 1 skips this step entirely and goes directly to step 3 — that is the sole budget exemption. If `meta.attempts >= MAX_ATTEMPTS`, the task has exhausted the automatic-spawn budget that `--max-attempts` bounds and must block without further spawning. To keep the remediation flow (flip `blocked → pending` and re-run with a higher budget) working in one supervisor run instead of two — Step A step 1b would otherwise fire `stale-artifact` on the next dispatch — perform the same best-effort cleanup that step 5 does BEFORE blocking:
+2. **Budget check — ONLY on automatic paths** (`signal == "cycle-cap"`, `signal == "stuck"` below `opus/max`, or `signal == "leak"`). The opus/max stuck human-guidance path from step 1 skips this step entirely and goes directly to step 3 — that is the sole budget exemption. The leak path arrives here from step 4a (brief revision done first), the cycle-cap and below-opus/max stuck paths arrive directly from step 1. If `meta.attempts >= MAX_ATTEMPTS`, the task has exhausted the automatic-spawn budget that `--max-attempts` bounds and must block without further spawning. To keep the remediation flow (flip `blocked → pending` and re-run with a higher budget) working in one supervisor run instead of two — Step A step 1b would otherwise fire `stale-artifact` on the next dispatch — perform the same best-effort cleanup that step 5 does BEFORE blocking:
    - Best-effort cleanup: `git worktree remove --force "<meta.worktree_path>" 2>/dev/null` then `git branch -D "ccx/<task_id>" 2>/dev/null`. The `<meta.worktree_path>` substitution is the absolute path the resolver wrote into `RUNNING[<task_id>].worktree_path` at dispatch time (Step A step 7) — in customer mode `<STATE_DIR>/worktrees/<task_key>/`, in dogfood mode the legacy sibling. Rationale: the last attempt exited stuck or cycle-cap without a commit, so there is nothing here the downstream pipeline needs; if the human wants to inspect the attempt, `STATE_DIR/workers/<task_id>.log` (concatenated across every attempt per the log-continuity rule) still holds the full transcript, and `git reflog` preserves the branch pointer for a while. A failure to remove either artifact is NOT fatal on this path — unlike `stuck-cleanup-failed` in step 5, the task is already being blocked; surface the residue in `notes` so the human knows it is there.
    - **M9 T-2 — paranoid `_index.json` cleanup** (only when `IS_PARANOID == true`): remove the entry for `task_id` from `<STATE_DIR>/worktrees/_index.json` and rewrite via the temp-and-rename idiom. Best-effort like the worktree remove above; on failure include `"_index.json stale"` in `cleanup_residue` so the human knows to inspect.
    - Verify cleanup: `git rev-parse --verify "refs/heads/ccx/<task_id>" 2>/dev/null` (expect non-zero) AND `test -e "<meta.worktree_path>"` (expect non-zero). If either still exists, record that in `cleanup_residue` for the notes string (e.g. `cleanup_residue = "worktree still present at <meta.worktree_path>"`); otherwise `cleanup_residue = ""`.
@@ -1886,6 +2042,32 @@ Steps 1 and 2 are deliberately ordered **signal dispatch first, budget check sec
    - Remove from `RUNNING`. Continue the outer Step B drain loop.
 
    On success, flow reaches step 5 with `next_tier = meta.tier` (already at `opus/max`; no tier change on the human-guidance path).
+
+4a. **M9 T-6 — synthesize a Decisions entry from the verifier's leak detail** (only reached when `signal == "leak"` from step 1). Mirrors step 4's brief-revise mechanism but seeded mechanically from `leak_detail` (the verifier's stderr) rather than human input — no `AskUserQuestion` fires on the leak path; the verifier's structured output IS the guidance.
+
+   - Build `guidance_text`:
+
+     ```
+     ccx verify refused this worker's last attempt (attempt <meta.attempts>) with the following M9 invariant violation(s):
+
+     <leak_detail, indented two spaces, trailing newline trimmed>
+
+     Rewrite your commits / diff so the verifier exits 0. Key rules per invariant:
+     - 10: do NOT create a `.ccx/` directory in the working tree.
+     - 11: do NOT add a `.ccx` entry to `.gitignore`.
+     - 12: do NOT include `T-N:`, `[T-N]`, standalone `T-N`, `supervisor:dispatch`, `supervisor:update board`, or `ccx/` in commit subjects or bodies. Use a natural commit message (e.g. `fix: …`, `add: …`) that does NOT reference the task id directly. The opt-in `Ccx-Task: T-N` Git trailer is allowed only when `ccx.commit.trailer = true`.
+     - 13: do NOT produce a `Merge branch 'ccx/...'` merge commit. Squash strategy avoids this by construction; if you see this fire, ccx.merge.strategy was set to `merge` in a non-dogfood repo and the supervisor config-load gate should have STOPped earlier.
+     - 14: branch ref hygiene is the supervisor's job, not yours — if your worker re-runs see this code, the supervisor will surface a manual cleanup hint.
+     - 15: do NOT edit `.claude/`, `CLAUDE.md`, `.claude/settings.json`, or `AGENTS.md`. If your task legitimately requires it, the brief's scope.include should explicitly list those paths AND the supervisor's pre-merge gate should be invoked with `CCX_PROTECTED_OPTIN=1`.
+     ```
+
+     The `leak_detail` string comes straight from Step B step 3's `VERIFY_STDERR` capture — one `ccx verify: …` line per violation, every invariant the worker tripped surfaced in this single revision.
+
+   - Apply the same brief-revise file write as step 4: read `STATE_DIR/tasks/<task_id>.md`, append the synthesized `- q:` / `a: |` entry to `## Decisions`, persist the revised brief, and (dogfood only) commit the brief alone on INTEGRATION with the dogfood commit subject `supervisor: revise <task_id> brief — M9 T-6 leak recovery (attempt <meta.attempts + 1>)`. The dogfood-commit-failure path (step 4's clause) applies identically; on failure, classify as `stuck-recovery-failed` with `LAST_SIGNAL_ON_BLOCK = "leak"` and bail out.
+
+   - The `q:` string is `"M9 invariant leak on attempt <meta.attempts> — exit code <VERIFY_RC>"`. The `a:` block scalar carries `guidance_text` verbatim (multi-line preserved via YAML `|`).
+
+   - On success, fall through to step 2 (budget check) — leak retries are budget-gated like cycle-cap and below-opus/max stuck. The budget exhaustion path blocks with `exit_status: "attempts-exhausted"` and `LAST_SIGNAL_ON_BLOCK = "leak"`, classified as stuck-flavored at session close.
 
 5. **Clean the prior worktree and branch.** Every path that reaches this step — automatic tier bump, cycle-cap same-tier retry, or human-guidance opus/max re-dispatch — MUST remove the prior worktree + branch before re-spawning; otherwise Step A step 1b's stale-artifact gate would fire on the re-dispatch and classify the task as `stale-artifact` blocked.
 
