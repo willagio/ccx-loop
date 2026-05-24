@@ -68,7 +68,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/plan.md
       - docs/supervisor-design.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on: []
   brief: .ccx/tasks/T-1.md
@@ -76,6 +76,8 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
   worktree: "/home/will/Repositories/ccx-loop-T-1"
   branch: "ccx/T-1"
   started_at: "2026-05-24T13:15:29Z"
+  finished_at: "2026-05-24T14:25:00Z"
+  exit_status: approved
   notes: |
     Foundation for M9. Every other M9 task assumes state lives at
     $XDG_DATA_HOME/ccx/<repo-key>/ (Linux/macOS) with $CCX_DATA_HOME
@@ -125,7 +127,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/supervisor.md
       - docs/supervisor-design.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on:
     - T-1
@@ -134,6 +136,8 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
   worktree: "/home/will/Repositories/ccx-loop-T-2"
   branch: "ccx/T-2"
   started_at: "2026-05-24T14:27:26Z"
+  finished_at: "2026-05-24T15:54:30Z"
+  exit_status: approved
   notes: |
     Move worker worktree spawn from the supervisor's current location
     (sibling of the repo: ~/Repositories/ccx-loop-T-X) into
@@ -179,7 +183,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/forever.md
       - docs/supervisor-design.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on:
     - T-1
@@ -188,6 +192,8 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
   worktree: "/home/will/Repositories/ccx-loop-T-3"
   branch: "ccx/T-3"
   started_at: "2026-05-24T15:55:29Z"
+  finished_at: "2026-05-24T16:23:20Z"
+  exit_status: approved
   notes: |
     Independent of T-2 — this touches only the loop's commit step,
     not state location. Depends on T-1 because it consumes the shared
@@ -239,7 +245,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/loop.md
       - docs/supervisor-design.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on:
     - T-3
@@ -248,6 +254,8 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
   worktree: "/home/will/Repositories/ccx-loop-T-4"
   branch: "ccx/T-4"
   started_at: "2026-05-24T16:24:18Z"
+  finished_at: "2026-05-24T18:19:41Z"
+  exit_status: approved
   notes: |
     Replace the current supervisor merge logic (which produces
     `Merge branch 'ccx/T-X'` commits) with a configurable strategy
@@ -304,7 +312,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - .ccx-config
       - docs/supervisor-design.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on:
     - T-1
@@ -313,6 +321,8 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
   worktree: "/home/will/Repositories/ccx-loop-T-5"
   branch: "ccx/T-5"
   started_at: "2026-05-24T18:20:35Z"
+  finished_at: "2026-05-24T19:33:50Z"
+  exit_status: approved
   notes: |
     Surface the external state directory to humans through three
     helpers, plus formalize the dogfood escape hatch.
@@ -362,7 +372,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - README.md
       - docs/supervisor-design.md
     exclude: []
-  status: assigned
+  status: merged
   priority: normal
   depends_on:
     - T-1
@@ -375,6 +385,8 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
   worktree: "/home/will/Repositories/ccx-loop-T-6"
   branch: "ccx/T-6"
   started_at: "2026-05-24T19:34:33Z"
+  finished_at: "2026-05-24T20:42:08Z"
+  exit_status: approved
   notes: |
     The contract enforcer. Implements `ccx verify` as a shell script
     that checks all six M9 invariants and is invoked by the
