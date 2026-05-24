@@ -4,9 +4,9 @@ argument-hint: "[--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-
 allowed-tools: Bash, BashOutput, Read, Write, Edit, Glob, Grep, AskUserQuestion, TaskCreate, TaskUpdate, mcp__ccx-chat__chat_register, mcp__ccx-chat__chat_send, mcp__ccx-chat__chat_set_phase, mcp__ccx-chat__chat_close, mcp__ccx-chat__chat_supervisor_poll, mcp__ccx-chat__chat_supervisor_reply, mcp__ccx-chat__chat_supervisor_escalate, mcp__ccx-chat__chat_supervisor_close, mcp__ccx-chat__chat_supervisor_recent_closures
 ---
 
-# /ccx:supervisor — Parallel Worker Orchestrator (M7 + M8a infra refresh + M8b duet passthrough)
+# /ccx:supervisor — Parallel Worker Orchestrator (M7 + M8a infra refresh + M8b duet passthrough + M9 T-1/T-2/T-3/T-4 customer-mode invisibility)
 
-One human drives N parallel `/ccx:loop` workers from a shared `BOARD.md`. Each task runs in its own git worktree, gets its own brief file, and merges back into the integration branch on approval. Worker `chat_ask` calls are intercepted by the broker; the supervisor session answers from the brief / BOARD / merge history when possible, escalating to Discord only when no deterministic answer fits. Tasks whose scope globs touch overlapping files are serialized at dispatch time so concurrent worktrees do not produce conflicting merges, and every merge is staged via a `git merge --squash` dry-run before being finalized as a single supervisor-authored `T-<id>: <title>` commit. When a worker exits without approval, the supervisor automatically re-dispatches the task at a new tier on the fixed 5-rung model ladder — `stuck` bumps one rung, `cycle-cap` (aka `budget-exhausted`) retries the same rung — until either the task merges or the per-task `--max-attempts` budget runs out on the automatic paths. A `stuck` exit at the top of the ladder (`opus/max`) is the only remaining human gate, prompting via the M5 `AskUserQuestion` path; that single branch is exempt from the `--max-attempts` budget (per-event, not latching) so the advertised top-of-ladder human recovery stays reachable under the default configuration while every automatic loop — including cycle-cap retries that may follow a human-directed re-dispatch — remains bounded.
+One human drives N parallel `/ccx:loop` workers from a shared `BOARD.md`. Each task runs in its own git worktree, gets its own brief file, and merges back into the integration branch on approval. Worker `chat_ask` calls are intercepted by the broker; the supervisor session answers from the brief / BOARD / merge history when possible, escalating to Discord only when no deterministic answer fits. Tasks whose scope globs touch overlapping files are serialized at dispatch time so concurrent worktrees do not produce conflicting merges. **Merge strategy is configurable per repo via `ccx.merge.strategy` (M9 T-4)** — default `squash` runs `git merge --squash` and finalises with `git commit -F` using the worker's final commit message (subject hygiene-gated by a merge-boundary regex re-check in customer mode; preserved verbatim in dogfood mode); `rebase` replays worker commits via `git rebase <INTEGRATION>` + `git merge --ff-only`; `merge` (gated on `ccx.dogfood = true`) preserves the legacy `git merge --no-ff` shape with the `Merge branch 'ccx/<task_id>'` subject. Post-merge cleanup (all strategies) automatically removes the worker's worktree (T-2) and deletes the `ccx/<task_id>` branch (T-4) on the merged exit; blocked exits preserve the branch for human triage. When a worker exits without approval, the supervisor automatically re-dispatches the task at a new tier on the fixed 5-rung model ladder — `stuck` bumps one rung, `cycle-cap` (aka `budget-exhausted`) retries the same rung — until either the task merges or the per-task `--max-attempts` budget runs out on the automatic paths. A `stuck` exit at the top of the ladder (`opus/max`) is the only remaining human gate, prompting via the M5 `AskUserQuestion` path; that single branch is exempt from the `--max-attempts` budget (per-event, not latching) so the advertised top-of-ladder human recovery stays reachable under the default configuration while every automatic loop — including cycle-cap retries that may follow a human-directed re-dispatch — remains bounded.
 
 Raw arguments: `$ARGUMENTS`
 
@@ -20,6 +20,7 @@ Raw arguments: `$ARGUMENTS`
 - **M7 — model tier escalation.** Every `claude -p` worker spawn now includes `--model <alias>` and `--effort <level>` drawn from the rung the supervisor currently has the task on. The ladder is fixed at five rungs — `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)` — and three new supervisor flags (`--max-attempts N`, `--worker-loops N`, `--start-tier <alias>`) expose the knobs. On worker exit without approval the supervisor reads the `chat_close` status: `stuck` bumps the tier one rung and re-dispatches automatically (no human prompt), `cycle-cap` (the M7 label for `/ccx:loop`'s `budget-exhausted`) retries at the same rung, and both increment the BOARD `attempts` counter. At `opus/max`, stuck falls through to the pre-existing M5 human-guidance `AskUserQuestion` path ("ladder exhausted") — this branch is exempt from `--max-attempts` so the advertised top-of-ladder recovery stays reachable under the default budget; cycle-cap keeps same-rung retrying until `attempts >= --max-attempts`, then blocks with `attempts-exhausted`. `STUCK_REDISPATCH_CAP` from M5 is superseded by `--max-attempts`. BOARD schema and `/ccx:plan` are unchanged — M7 is a supervisor + docs change only. See §P2.5 and `docs/supervisor-design.md` §15.
 - **M8a — supervisor infra refresh (this milestone).** Two narrow infra changes that unblock M8b's duet loop: (1) worker exit detection moves from `BashOutput`-on-`shell_id` PID-style polling to `claude agents --json` registry lookup (matched by `cwd == meta.worktree_path`) — see Step B's preamble and step 1; (2) Phase P0 step 3a best-effort fast-forwards local integration to its `origin/<INTEGRATION>` tip so every worker worktree forks from a fresh upstream base. Both have documented fallbacks (legacy `BashOutput`, local HEAD) so older Claude Code versions and purely-local repos degrade cleanly. See `docs/supervisor-design.md` §16.
 - **M8b — duet passthrough.** No new supervisor-level flags and no new supervisor-level decision logic. Three narrow surface changes wire `/ccx:loop --duet` into the orchestration: (1) brief frontmatter learns an optional `loop_flags: [...]` list (defaults `[]`) — currently allowlisted to whole-token `--duet` / `--codex-first` only (Step A step 2c); (2) Step A step 3's brief commit becomes "write → stage → probe → commit-or-skip" so a human-pre-committed duet brief is preserved byte-for-byte and re-dispatch keeps `loop_flags` stable across attempts; (3) §P2.2's dispatch prompt appends every validated `loop_flags` entry verbatim after `--chat`. A new block reason `loop-flags-rejected` (deterministic, `completed`-classified per P0.5 step 7 rule 5) fires when a brief's `loop_flags` carry anything outside the allowlist. BOARD schema and `/ccx:plan` are unchanged. See `docs/supervisor-design.md` §17.3 — that subsection is SSOT for the algorithm, the allowlist, and the lifecycle.
+- **M9 T-4 — merge strategy + branch cleanup.** Step B step 3 dispatches on the new `ccx.merge.strategy` config (`squash` default, `rebase` opt-in, `merge` dogfood-only). Customer-mode squash uses the worker's final commit message as the squash subject (no `T-<id>:` prefix — invariant 3) with a final marker-strip regex re-check at the merge boundary (Python helper, BSD-grep-portable); dogfood mode bypasses both the trailer split and the regex helpers entirely and commits the worker's message verbatim per §18.2.6. Step B step 5 adds an unconditional `git branch -D ccx/<task_id>` after the existing T-2 worktree-remove on the merged exit only (with stderr-captured verification surfacing failures via a dedicated `STATE_DIR/supervisor-branch-residue-<RUN_ID>.txt` sidecar). Two new blocked exit_status values: `leak-detected-at-merge` (customer-mode squash regex regression; worker branch preserved) and `rebase-conflict` (rebase strategy could not replay; branch AND worktree preserved). Both recovery paths are operator-driven (manual merge + mark merged, OR cleanup-then-flip-to-pending) because Step A's stale-artifact gate refuses naive re-dispatch onto preserved artifacts. See `docs/supervisor-design.md` §18.2.7 — the "Merge strategy resolver" section below is SSOT for the algorithm.
 
 Still deferred (out of scope for M7/M8a):
 
@@ -55,7 +56,7 @@ No free-form task description — the supervisor drives entirely from `BOARD.md`
 
 ## Guardrails
 
-- The supervisor MUST NOT push, force-push, amend published commits, or `git reset --hard` anything. `git branch -D` is permitted ONLY for supervisor-owned worker branches matching the pattern `ccx/<task_id>` (cleanup paths in Step A step 5's spawn-error handler and §P2.5 step 5's stuck/cycle-cap recovery teardown) — any other branch deletion is forbidden. This narrows the previous blanket ban so that M8a's pre-created worktree cleanup can complete without leaving stale `ccx/<task_id>` refs that would trip Step A step 1b's stale-artifact gate on the next run.
+- The supervisor MUST NOT push, force-push, amend published commits, or `git reset --hard` anything. `git branch -D` is permitted ONLY for supervisor-owned worker branches matching the pattern `ccx/<task_id>` (cleanup paths in Step A step 5's spawn-error handler, §P2.5 step 5's stuck/cycle-cap recovery teardown, and — added by M9 T-4 — Step B step 5's merged-exit post-merge cleanup that enforces invariant 5) — any other branch deletion is forbidden. M8a widened this from the previous blanket ban so pre-created worktree cleanup can complete without leaving stale `ccx/<task_id>` refs; T-4 further widened it so the post-merge contract can satisfy invariant 5 ("no `ccx/T-X` branch ref remains after a worker finishes successfully") automatically. Every permitted `git branch -D` site in this file is one of the three listed above; a future grep for `git branch -D` should match only those sites plus their failure-path retries.
 - Every `claude -p` worker spawn MUST use `Bash(run_in_background=true)` so the supervisor keeps control. Synchronous spawns would block the whole scheduling loop.
 - Worker log files land at `STATE_DIR/workers/<TASK_ID>.log`; the directory MUST exist before any spawn.
 - The supervisor MUST NOT mark a task `merged` in `BOARD.md` without first verifying the merge actually moved `HEAD` on the integration branch (`git rev-parse HEAD` changed).
@@ -190,8 +191,41 @@ In customer non-paranoid mode `_index.json` is NOT written — the task-key equa
 **Out of scope for T-2** (deferred to later milestones, called out so a reviewer of T-2's diff sees the boundary):
 
 - **Forced relocation of in-flight workers' existing worktrees.** T-2 applies to NEW spawns only — a worker already running at the legacy sibling path when the supervisor is upgraded to T-2 finishes at that path. The supervisor's per-task RUNNING entry caches the worktree path from dispatch time, so a mid-run upgrade is impossible by construction (one process, one resolver invocation per task).
-- **Branch deletion on worker finish.** T-4 owns `git branch -d ccx/<task_id>` after worktree removal. T-2 leaves the branch ref intact so a human can still `git checkout ccx/<task_id>` post-merge to inspect the squashed history; the existing P3 report prints the manual branch-cleanup command for now.
+- **Branch deletion on worker finish.** T-4 (the merge-strategy resolver below) owns `git branch -D ccx/<task_id>` after worktree removal; until T-4 ships, the existing P3 report prints the manual branch-cleanup command. T-2 leaves the branch ref intact so a human can still `git checkout ccx/<task_id>` post-merge to inspect the squashed history.
 - **Migration of legacy sibling worktrees** in customer-mode repos that ran a pre-T-2 supervisor. The next supervisor run's Step A step 1b stale-artifact gate will refuse to overwrite the legacy path; the operator runs `git worktree remove <REPO_ROOT>-<task_id>` once and the next dispatch lands at the new T-2 location. Auto-migration is rejected for the same reason T-1's BOARD migration is rejected — moving paths inside P0 would mutate operator state before the supervisor has even checked broker availability.
+
+---
+
+## Merge strategy resolver (`MERGE_STRATEGY`)
+
+M9 T-4 — customer-mode invisibility, third leak: the merge commit itself. Pre-T-4 every approved worker merged via `git merge --squash ccx/<task_id>` finalised with `git commit -m "T-<task_id>: <task_title>" ...` — the `T-<id>:` subject is a tooling marker (invariant 3) AND the only-merge-strategy choice was hardcoded with no escape hatch for dogfood-mode `Merge branch 'ccx/...'` history. T-4 generalises the merge step into a strategy dispatcher and gates the legacy `merge` strategy behind dogfood. SSOT for the design: `docs/supervisor-design.md` §18.2.7.
+
+**The resolver is the SOLE source of merge-strategy decisions in this command file.** Every Step B step 3 branch reads `MERGE_STRATEGY` (resolved once at P0 step 1a) — no later step re-reads `git config ccx.merge.strategy` directly, so a mid-run config edit cannot half-apply (some merges squash, others rebase) and a future grep for `git config ccx.merge.strategy` should match exactly one site, the resolver below.
+
+**Resolution algorithm** (runs ONCE at P0 step 1a, after `IS_DOGFOOD` is cached):
+
+1. `RAW_STRATEGY="$(git config --get ccx.merge.strategy 2>/dev/null || echo squash)"`. Plain string read (not `--type=bool`) — the value is an enum, not a boolean. Default `squash` matches the brief's "Default: squash" decision and keeps the customer-mode invariants (no `Merge branch 'ccx/...'` first parent on mainline) holding without explicit operator action.
+2. Validate `RAW_STRATEGY` is one of `squash | rebase | merge`. Any other value (including `Squash` — the resolver is case-sensitive, the brief specifies lowercase identifiers) → STOP with: `ccx.merge.strategy must be one of squash | rebase | merge (got: "<RAW_STRATEGY>"). Default is squash. Unset the config key or set it to one of the three permitted values, then re-run /ccx:supervisor.`
+3. **Dogfood-gate the `merge` strategy.** If `RAW_STRATEGY == "merge"` AND `IS_DOGFOOD == false` → STOP with: `ccx.merge.strategy = merge requires 'git config ccx.dogfood true' to enable. Customer-mode invariant 4 forbids 'Merge branch ccx/...' first-parent commits on the user's integration branch; the merge strategy preserves that legacy shape and is gated to the dogfood narrative. Either: (a) unset ccx.merge.strategy (defaults to squash — recommended for any non-ccx-loop repo), (b) set ccx.merge.strategy = rebase / squash, or (c) set ccx.dogfood = true if this is the ccx-loop repo or another opt-in dogfood checkout.` The dogfood gate fires at config-load time (here, at P0) — not at merge-attempt time — so the operator sees the misconfiguration before any worker has been dispatched. A merge-time fail would leave already-merged peers' history committed under one strategy and the rejected peer dangling, which is harder to triage than a hard stop before any side effect.
+4. Cache `MERGE_STRATEGY = RAW_STRATEGY` for the run. Every Step B step 3 branch reads this single value; no other step re-resolves.
+
+**Strategy matrix** (Step B step 3 dispatches on `MERGE_STRATEGY`):
+
+| Strategy | Required mode | Git operations | Commit subject | Rationale |
+|---|---|---|---|---|
+| `squash` (default) | customer + dogfood | `git merge --squash ccx/<task_id>` then `git commit -F <file>` where `<file>` is the worker's final commit message. Customer mode: regex-checked one more time at merge boundary (the worker already ran T-3 at commit time). Dogfood mode: the regex is SKIPPED — the worker bypassed T-3 per §18.2.6 and dogfood subjects intentionally carry `T-N:` / `supervisor:` markers. | Worker's final subject verbatim — strips `T-<id>:` prefix in customer mode (enforced by the T-3 worker pipeline + this merge-boundary re-check); preserves the dogfood narrative subject in dogfood mode (`T-<id>: <title>` from `M9 T-N:` worker drafts). | Default for customer mode — preserves invariant 3 (no tooling-marker subjects) and invariant 4 (no `Merge branch 'ccx/...'` first parent). Default for dogfood mode — produces the existing one-commit-per-task audit shape with the legible task-id prefix. One mainline commit per task in both modes. |
+| `rebase` | customer + dogfood | `git rebase <INTEGRATION> ccx/<task_id>` from the worker branch's perspective, then `git merge --ff-only ccx/<task_id>` from the integration branch. | Worker commits preserved verbatim (each subject is already T-3-processed at worker time, so no extra rewrite). | Customer-mode opt-in for repos that prefer multi-commit history per task. Linear graph; no merge commit. |
+| `merge` | dogfood only | `git merge --no-ff ccx/<task_id>` (legacy path; matches pre-T-4 dogfood narrative). | Git's default `Merge branch 'ccx/<task_id>'`. | Preserves this repo's existing audit history. NEVER reached in customer mode — step 3's startup gate STOPs the run. |
+
+**Post-merge cleanup contract** (T-4, all strategies, runs UNCONDITIONALLY after a successful merge): the supervisor removes the worker's worktree FIRST, then deletes the worker's branch. The order is load-bearing — `git branch -D` refuses to delete a branch that is checked out in any worktree, including the supervisor's just-completed merge worktree, so the worktree-remove MUST land first. Both operations are folded into Step B step 5's existing worker-finish path (T-2 already centralised the worktree-removal site there for every terminal exit; T-4 adds the branch-delete in the same site, gated on the exit being a successful merge — blocked exits preserve the branch for human triage per the T-2 contract). The new exit_status set introduced by T-4 (`leak-detected-at-merge`, `rebase-conflict`) follows the same blocked-path semantics as the existing `merge-conflict` / `merge-aborted` outcomes: branch is preserved for inspection; the operator decides whether to revise the brief and re-dispatch.
+
+**Authority for merge invocations.** Every `git merge` / `git rebase` / `git commit` call inside Step B step 3 MUST dispatch on `MERGE_STRATEGY` — never hardcode a single strategy. The dogfood case happens to evaluate to `merge`, but it is the resolver's output, not a hand-written literal. A future grep for `git merge --no-ff` should match exactly one site (Step B step 3's `merge`-strategy branch); a grep for `git merge --squash` should match the same step's `squash`-strategy branch; a grep for `git rebase` should match the `rebase`-strategy branch and only it.
+
+**Out of scope for T-4** (deferred to later milestones, called out so a reviewer of T-4's diff sees the boundary):
+
+- **Auto-routing `leak-detected-at-merge` and `rebase-conflict` into §P2.5's stuck-flavored signal set.** T-4 surfaces both as new BOARD `exit_status` values that block the task with the worker branch intact; routing them through the supervisor's stuck-recovery auto-revise mechanism would require extending Step B step 4's sub-classifier AND §P2.5's signal enum, which is out of T-4's per-task scope (same deferral pattern T-3's "Supervisor-side handling — current behaviour and follow-up" applied to `commit-marker-leak`). The operator's manual remediation path is documented in the BOARD `notes` field: revise the brief's `## Decisions` section (for `leak-detected-at-merge` — typically the commit subject regressed despite the T-3 retry budget) or resolve the rebase conflict on `ccx/<task_id>` and re-dispatch (for `rebase-conflict`).
+- **Per-task `merge_strategy` override** (a BOARD-row or brief-frontmatter field). M9 keeps BOARD schema unchanged; per-repo `ccx.merge.strategy` is the only knob in this milestone. A future M10+ may introduce per-task overrides if the use case appears.
+- **Mid-run strategy switching.** `MERGE_STRATEGY` is resolved once at P0 step 1a and cached; a mid-run `git config` edit cannot half-apply. Every merge in a single supervisor run uses the same strategy.
 
 ---
 
@@ -220,6 +254,29 @@ In customer non-paranoid mode `_index.json` is NOT written — the task-key equa
      ```
      Per-repo flag with no global default; `IS_PARANOID == true` requires explicit `git config ccx.paranoid true` opt-in. The flag is read here exactly once and cached for the lifetime of the run so a mid-run `git config` edit cannot half-apply (some tasks paranoid-keyed, others readable-keyed in the same `_index.json`). Dogfood + paranoid is treated as dogfood: the worktree-path resolver short-circuits to the legacy sibling path before consulting `IS_PARANOID`, so setting both flags in this repo produces no behavior change.
 
+   **M9 T-4 — resolve `MERGE_STRATEGY`** in the same block per the "Merge strategy resolver" section above. The resolver reads `git config ccx.merge.strategy`, validates against `{squash | rebase | merge}`, and STOPs the run when `merge` is selected without `IS_DOGFOOD == true`. The dogfood gate fires here (before any worker is dispatched) — not at merge-attempt time — so the operator sees the misconfiguration before any side effect. Cache the validated value as `MERGE_STRATEGY`; every Step B step 3 branch reads this single variable:
+     ```bash
+     RAW_STRATEGY="$(git config --get ccx.merge.strategy 2>/dev/null || echo squash)"
+     case "$RAW_STRATEGY" in
+       squash|rebase) MERGE_STRATEGY="$RAW_STRATEGY" ;;
+       merge)
+         if [ "$IS_DOGFOOD" = "true" ]; then
+           MERGE_STRATEGY="merge"
+         else
+           # STOP with the dogfood-gate error from the resolver section above.
+           # The literal error string lives in the resolver section so a future
+           # edit cannot drift the gate's wording away from the design contract.
+           exit 1
+         fi
+         ;;
+         *)
+         # STOP with the validation error from the resolver section above.
+         exit 1
+         ;;
+     esac
+     ```
+     The implementation MUST emit the literal error strings spelled out in the resolver section (not paraphrased) — those strings are part of the operator-facing contract and a paraphrase would silently break the documented remediation paths.
+
    The resolver also creates the four pre-required subdirectories (`tasks/`, `workers/`, `supervisor-audit/`, and `STATE_DIR` itself) and emits the one-line `ccx state: <STATE_DIR>` stderr announcement. P0 step 5 below is the only other directory-creation point and is superseded by this step's `mkdir -p` — keep step 5's location in the phase so the original numbering reads continuously, but the bodies have moved up. The `<STATE_DIR>/worktrees/` directory is NOT created here — the worktree-path resolver creates it lazily on first customer-mode resolution (see the "First-access side effect" clause of the worktree-path resolver section), so a customer-mode run that never dispatches a worker leaves no empty `worktrees/` behind.
 2. Resolve integration branch:
    - If `--integration` is set, use that. Verify with `git rev-parse --verify "refs/heads/<branch>"`. Stop if missing.
@@ -242,6 +299,10 @@ In customer non-paranoid mode `_index.json` is NOT written — the task-key equa
 5. Already handled in step 1a (the resolver's `mkdir -p` covers `STATE_DIR/tasks/`, `STATE_DIR/workers/`, `STATE_DIR/supervisor-audit/`). The numbered step is retained as a placeholder so the phase numbering reads continuously across older revisions; do NOT re-create the directories here.
 5a. **Compute a per-run supervisor ID** `SUPERVISOR_RUN_ID = <UTC-compact-ts>-<rand8>` (e.g. `20260417T153012Z-a3f9c011`). Per-run isolation is required because two concurrent `/ccx:supervisor` runs on the same host each own their own DISPATCHED set but share `STATE_DIR` — writing both runs' decisions into a single `STATE_DIR/supervisor-audit/<SUPERVISOR_RUN_ID>.jsonl` would let either run's Step D commit pick up the other's audit entries. Use `SUPERVISOR_RUN_ID` as the audit filename (Step B2 writes `STATE_DIR/supervisor-audit/<SUPERVISOR_RUN_ID>.jsonl`; Step D only stages that exact file; P3 reads that exact file). Do not reuse a prior run's ID.
 6. Verify `claude` CLI is on `$PATH`: `command -v claude`. If missing, STOP — the supervisor cannot spawn workers.
+6a. **M9 T-4 — verify `python3` is on `$PATH` when customer-mode squash is selected.** Step B step 3's customer-mode squash hygiene block (trailer-split helper + marker-strip regex helper) shells out to `python3`. If `python3` is missing, every customer-mode squash merge would deterministically fail the helper, fall into the regex-engine-failed branch, and block the task as `merge-aborted` even though the merge itself was clean. Catch the missing prerequisite once at P0 instead of N times at merge time:
+   - If `IS_DOGFOOD == false` AND `MERGE_STRATEGY == "squash"` AND `command -v python3` returns non-zero, STOP with: `python3 is required for the customer-mode squash hygiene check (merge-boundary regex re-check on the worker's commit message). Either install python3 (sudo apt-get install python3 / brew install python3) and re-run, or switch to a non-squash strategy: 'git config ccx.merge.strategy rebase' (preserves worker commits, no regex re-check needed).`
+   - Skip the check when `IS_DOGFOOD == true` (the dogfood squash shortcut bypasses the helpers entirely per the strategy dispatcher's `if [ "$IS_DOGFOOD" = "true" ]` branch).
+   - Skip the check when `MERGE_STRATEGY == "rebase"` or `MERGE_STRATEGY == "merge"` (neither runs the python helper).
 7. Check `~/.claude/ccx-chat/config.json`. If missing, WARN (workers with `--chat` will disable chat per `/ccx:loop` Phase 0.7 contract — the supervisor still works, but worker `chat_ask` calls will fall back to `AskUserQuestion` which in `-p` mode aborts the worker cleanly). Do not stop.
 
 If anything fails, print the exact error and stop. No partial setup.
@@ -512,24 +573,30 @@ For each `(task_id, meta)` in `RUNNING`:
    - **no-commit** — exit code 0 but no new commits. Worker exited via filtered-unapproved, stuck, cycle-cap (M7 — `/ccx:loop`'s `budget-exhausted` status), or user cancellation — `/ccx:loop`'s Phase 4 auto-commit gate correctly blocked the commit. Step 4 below splits this bucket further (M7 sub-classifier peels stuck and cycle-cap into §P2.5; the rest mark `blocked`).
    - **error** — non-zero exit code (crash, invalid args, missing `claude -p`). Mark `blocked`.
 
-3. For **approved**, attempt a **two-step pre-merge dry-run** onto the integration branch using `git merge --squash`. The dry-run stages the merge result into the index + worktree without creating any commit; the supervisor then inspects unmerged paths, asserts the rest of the working tree was clean before the squash, and either finalizes with one supervisor-authored commit (subject `T-<id>: <title>`) or rolls back via `git restore --staged --worktree .`. Squash is preferred over `--no-ff`: `/ccx:loop` Phase 4 squashes its review-fix cycles into a single final commit, so a worker branch is exactly one commit anyway, and a `--no-ff` merge commit would just add a tree-empty graph node. Squash gives the same audit surface (one commit per task on integration, identifiable by its `T-<id>:` subject) without the extra commit:
+3. For **approved**, attempt a **two-step pre-merge dry-run** onto the integration branch, dispatching on `MERGE_STRATEGY` (resolved once at P0 step 1a per the "Merge strategy resolver" section above). All three strategies share the same pre-merge cleanliness assert (the rollback path wipes uncommitted changes wholesale and MUST refuse the merge if any sibling work is dirty); the strategies differ in how they stage and finalise the merged result:
+
+   - **`squash`** (default) — stages the merge result into the index + worktree via `git merge --squash` without creating any commit; the supervisor then inspects unmerged paths and either finalises with one supervisor-authored commit using **the worker's final commit message** (T-3-processed at worker time, regex-checked one more time at the merge boundary) or rolls back via `git restore --staged --worktree .`. The commit subject is the worker's verbatim subject (no `T-<id>:` prefix — invariant 3); `git commit -F <message-file>` ensures the multi-line message lands without shell-escaping hazards.
+   - **`rebase`** — replays each worker commit on top of the integration branch (`git rebase <INTEGRATION>` on the worker branch), then fast-forwards integration via `git merge --ff-only ccx/<task_id>`. Each commit's subject + body are already T-3-processed at worker time, so no extra rewrite happens here. Conflicts during the rebase abort cleanly (`git rebase --abort` runs in the failure branch and the supervisor classifies the task as `rebase-conflict`).
+   - **`merge`** (dogfood only — P0 step 1a's gate STOPs every customer-mode run before reaching this step) — preserves the legacy `git merge --no-ff ccx/<task_id>` path with Git's default `Merge branch 'ccx/<task_id>'` subject. No T-3 regex re-check (the merge subject is intentionally a tooling marker in dogfood mode; the dogfood narrative IS the product).
+
+   Branch on `MERGE_STRATEGY` AFTER the pre-merge cleanliness assert and BEFORE any side effect:
 
    ```bash
-   # Pre-merge cleanliness assert. The rollback path (`git restore --staged
-   # --worktree .`) wipes uncommitted changes wholesale. P0 step 3 already
-   # gates on a clean tree at supervisor entry, but a prior Step B iteration
-   # could in principle leave artifacts; re-asserting here is load-bearing —
-   # if the tree is dirty we MUST refuse this merge entirely (skipping every
-   # downstream `git merge --squash` / `git restore` call), classify the task
-   # as merge-aborted, and continue with the next RUNNING task. Falling
-   # through to `git merge --squash` on a dirty tree means the rollback path
-   # would `git restore --staged --worktree .` over the user's unrelated
-   # uncommitted edits and silently destroy them.
+   # Pre-merge cleanliness assert (shared by every strategy). The rollback
+   # path (`git restore --staged --worktree .`) wipes uncommitted changes
+   # wholesale. P0 step 3 already gates on a clean tree at supervisor entry,
+   # but a prior Step B iteration could in principle leave artifacts;
+   # re-asserting here is load-bearing — if the tree is dirty we MUST refuse
+   # this merge entirely (skipping every downstream `git merge` / `git rebase`
+   # / `git restore` call), classify the task as merge-aborted, and continue
+   # with the next RUNNING task. Falling through to a real merge on a dirty
+   # tree means the rollback path would `git restore --staged --worktree .`
+   # over the user's unrelated uncommitted edits and silently destroy them.
    PRE_MERGE_DIRTY="$(git status --porcelain)"
    if [ -n "$PRE_MERGE_DIRTY" ]; then
-     # Skip the whole squash/commit/rollback block below. Append <task_id> to
-     # BLOCKED_IDS, stash BOARD-row update: status: "blocked", exit_status:
-     # "merge-aborted", notes: "integration tree dirty before squash —
+     # Skip the whole strategy/commit/rollback block below. Append <task_id>
+     # to BLOCKED_IDS, stash BOARD-row update: status: "blocked", exit_status:
+     # "merge-aborted", notes: "integration tree dirty before merge —
      # refused to attempt merge (would risk clobbering: <first 200 chars of
      # PRE_MERGE_DIRTY, single-line>)". Do NOT set STOP_DISPATCHING — this
      # is per-merge, not per-supervisor; if every subsequent peer also hits
@@ -539,81 +606,628 @@ For each `(task_id, meta)` in `RUNNING`:
      :
    fi
 
-   if git merge --squash --no-edit "ccx/<task_id>"; then
-     # Squash succeeded — index + worktree now hold the merged result with
-     # NO MERGE_HEAD set (squash never sets MERGE_HEAD). Inspect unmerged
-     # paths via `git ls-files -u`; squash skips files with conflicts but
-     # surfaces them in the unmerged-paths list rather than aborting.
-     UNMERGED="$(git ls-files -u)"
-     if [ -z "$UNMERGED" ]; then
-       # Clean squash. Finalize as one supervisor-authored commit whose
-       # body preserves every worker commit's full message (subject + body),
-       # so the M3 Tier-3 worker-history lookup (§P2.3) keeps its citation
-       # surface even after squash collapsed the per-cycle commits. Without
-       # this, the integration branch would only carry the supervisor's
-       # `T-<id>: <title>` subject line and Tier-3 would have nothing to
-       # match. `--no-merges` excludes any older `--no-ff` history that
-       # might be reachable; `<INTEGRATION>..ccx/<task_id>` scopes to the
-       # worker's own commits ahead of integration, in chronological order.
-       WORKER_LOG="$(git log --no-merges --reverse --format='--- %h %s%n%b' "<INTEGRATION>..ccx/<task_id>")"
-       git commit -m "T-<task_id>: <task_title>" -m "Worker commits squashed into this merge:" -m "$WORKER_LOG"
-     else
-       # Conflict: capture file list and roll back the staged squash.
-       CONFLICT_FILES="$(git ls-files -u | awk '{print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')"
-       git restore --staged --worktree .
-     fi
-   else
-     # Non-zero from --squash. Two sub-cases share this branch and must be
-     # distinguished BEFORE the rollback wipes the unmerged index:
-     #   (a) a normal content conflict — squash leaves stage-2/3 entries in
-     #       the index AND exits non-zero; this is the common case and must
-     #       be classified as `merge-conflict`, not `merge-aborted`.
-     #   (b) a true refusal (pre-merge hook rejection, branch protection
-     #       blocking the staged write, unreachable object) — no unmerged
-     #       paths, exit non-zero; this is `merge-aborted`.
-     # Inspect `git ls-files -u` first; only wipe afterwards. The rollback
-     # is idempotent regardless of which sub-case we hit.
-     UNMERGED="$(git ls-files -u)"
-     if [ -n "$UNMERGED" ]; then
-       CONFLICT_FILES="$(echo "$UNMERGED" | awk '{print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')"
-     else
-       CONFLICT_FILES=""
-     fi
-     git restore --staged --worktree .
-     # Caller branches on CONFLICT_FILES: non-empty → "Conflict" outcome;
-     # empty → "Non-conflict squash refusal" outcome (single in-iteration
-     # retry, then merge-aborted if it persists).
-   fi
+   # M9 T-4 — strategy dispatch. The MERGE_STRATEGY value comes from P0
+   # step 1a's resolver; this is the SOLE site where the choice between
+   # squash / rebase / merge is materialised. The merge strategy is gated
+   # to dogfood mode at startup, so reaching the `merge` branch in customer
+   # mode is impossible — P0 step 1a's STOP would have already fired.
+   case "$MERGE_STRATEGY" in
+     squash)
+       # --- SQUASH STRATEGY (default, customer + dogfood) ---
+       if git merge --squash --no-edit "ccx/<task_id>"; then
+         # Squash succeeded — index + worktree now hold the merged result
+         # with NO MERGE_HEAD set (squash never sets MERGE_HEAD). Inspect
+         # unmerged paths via `git ls-files -u`; squash skips files with
+         # conflicts but surfaces them in the unmerged-paths list rather
+         # than aborting.
+         UNMERGED="$(git ls-files -u)"
+         if [ -z "$UNMERGED" ]; then
+           # Clean squash. The squash commit MUST use the worker's final
+           # commit message verbatim (T-3-processed at worker time) — NOT
+           # the supervisor-authored `T-<id>: <title>` subject the pre-T-4
+           # path used. The worker's final commit is the tip of
+           # `ccx/<task_id>`; capture its full message via `git log -1
+           # --format=%B` (subject + body + trailers, single git invocation,
+           # preserves blank lines).
+           WORKER_FINAL_MSG="$(git log -1 --format=%B "ccx/<task_id>")"
+           # M9 T-4 dogfood shortcut — when IS_DOGFOOD == true, skip
+           # BOTH the trailer-split helper AND the regex helper
+           # entirely. The dogfood contract is "use the worker's
+           # message verbatim, no inspection" (§18.2.6 — dogfood
+           # bypasses T-3 hygiene at worker time), so running the
+           # helpers in dogfood mode adds nothing AND a helper failure
+           # (python3 missing, encoding edge case, etc.) would
+           # spuriously block a dogfood merge as `merge-aborted` even
+           # though the dogfood contract says "do not inspect". Gating
+           # only the match result (the cycle-11 fix) was not enough
+           # because a helper crash would still hit the
+           # `HYGIENE_RC -ne 0` branch. Wrap the entire helper block
+           # in the dogfood guard so dogfood mode never touches python3
+           # for hygiene reasons.
+           if [ "$IS_DOGFOOD" = "true" ]; then
+             # Commit the worker's final message verbatim — no
+             # trailer-split, no regex, no inspection. Capture the
+             # commit exit status (a commit-msg hook, signing failure,
+             # branch protection, etc. could still reject the dogfood
+             # commit even though hygiene is bypassed). On non-zero,
+             # fall through to the "Clean merge but commit fails" /
+             # `merge-commit-failed` outcome below; the staged squash
+             # result must be rolled back so the next iteration's
+             # `git status --porcelain` cleanliness assert does not
+             # see a stale staged tree.
+             MERGE_MSG_FILE="$(mktemp)"
+             printf '%s' "$WORKER_FINAL_MSG" > "$MERGE_MSG_FILE"
+             COMMIT_STDERR="$(git commit -F "$MERGE_MSG_FILE" 2>&1 1>/dev/null)"
+             COMMIT_RC=$?
+             rm -f "$MERGE_MSG_FILE"
+             if [ "$COMMIT_RC" -ne 0 ]; then
+               # Roll back and route to merge-commit-failed (see the
+               # outcome description below). Do NOT mark this task as
+               # merged; do NOT run the merged-exit branch delete.
+               git restore --staged --worktree .
+               # Caller: append <task_id> to BLOCKED_IDS, stash
+               # exit_status: "merge-commit-failed", notes carries
+               # COMMIT_STDERR's first 200 chars. The full
+               # merge-commit-failed recovery sidecar logic in the
+               # outcome description below applies (STOP_DISPATCHING
+               # set, sidecar written, etc.).
+               :
+             fi
+             # Otherwise falls into the "Clean squash + commit succeeds"
+             # outcome with HEAD advanced to the new squash commit.
+           else
+           # ----- CUSTOMER-MODE HYGIENE BLOCK -----
+           # Everything between the `else` above and the matching `fi`
+           # at the end of this block runs ONLY in customer mode. The
+           # block is indented one extra level for readability; the
+           # extra indent is cosmetic, not a separate scope.
+           # M9 T-4 merge-boundary regex gate — CUSTOMER MODE ONLY.
+           #
+           # Customer-mode contract: the worker already ran the full T-3
+           # hygiene pipeline (style-mirror + marker-strip + retry
+           # budget) at commit time; re-applying the regex here is the
+           # last gate before the message lands on mainline. A hit means
+           # the worker regressed AFTER its three-retry budget burned
+           # (rare — most commonly a model regression on a lower rung);
+           # we abort the merge and let the operator decide whether to
+           # revise the brief and re-dispatch. The regex pattern is the
+           # anchor copy in `docs/supervisor-design.md` §18.2.6 (T-3) —
+           # kept identical to the worker-side check so the writer/reader
+           # contract stays symmetric. Case-insensitive matching is
+           # applied via the engine flag (`grep -i -P`), NOT an inline
+           # `(?i)`.
+           #
+           # CRITICAL — strip the T-3 opt-in `Ccx-Task: T-X` trailer
+           # (worker-side step 4) BEFORE the regex. That trailer
+           # legitimately contains a task-id which the `\bT-[0-9]+\b`
+           # alternation branch would otherwise match, false-rejecting
+           # every trailer-bearing commit as `leak-detected-at-merge`.
+           # The Ccx-Task trailer is the SINGLE marker-bearing exception
+           # invariant 3 carves out; every other trailer (Co-Authored-By,
+           # Signed-off-by, etc.) does NOT contain task-id / tooling-
+           # marker content and is safe for the regex to scan.
+           #
+           # Why narrow-scope (Ccx-Task only) rather than the broader
+           # "strip the entire trailer block": Git's trailer convention
+           # is permissive about what looks like a trailer — `Key: value`
+           # where Key matches `[A-Za-z][A-Za-z0-9-]*` — and that pattern
+           # ALSO matches genuine tooling-marker shapes if they happen
+           # to land in the final paragraph (`T-4: follow-up`,
+           # `supervisor: dispatch`, etc.). A broader strip would
+           # silently remove those marker-shaped body paragraphs before
+           # the regex sees them, letting the leak through to mainline
+           # — exactly the failure mode invariant 3 exists to block.
+           # The surgical Ccx-Task strip leaves every other line
+           # (trailer or body) visible to the marker regex, so any
+           # tooling marker anywhere in the message — subject, body,
+           # or marker-shaped trailer paragraph — still trips the gate.
+           NON_TRAILER_MSG="$(printf '%s' "$WORKER_FINAL_MSG" | python3 -c '
+import re, sys
+try:
+    msg = sys.stdin.read()
+    lines = msg.rstrip("\n").split("\n")
+    # Two-pass trailer detection. We strip Ccx-Task: T-X lines ONLY
+    # when they appear inside a real Git trailer block at the tail
+    # of the message — final paragraph whose lines all match the
+    # trailer-key shape (`Key: value`), preceded by a blank-line
+    # separator, with body content above that separator. Body-level
+    # Ccx-Task: T-N lines (mid-message, no trailer-block context)
+    # MUST stay visible to the marker regex below, otherwise the
+    # regex misses them while `git commit -F` still commits the
+    # original WORKER_FINAL_MSG with the marker present.
+    #
+    # Pass 1 — walk backward from EOF over any line whose key
+    # matches the broad trailer pattern (any `Key: value` shape).
+    trailer_key_re = re.compile(r"^[A-Za-z][A-Za-z0-9-]*: ")
+    i = len(lines)
+    while i > 0 and trailer_key_re.match(lines[i-1]):
+        i -= 1
+    # Pass 2 — validate that what we walked over is a REAL trailer
+    # block: it must be preceded by a blank-line separator AND there
+    # must be body content above that separator. Both conditions
+    # must hold; if either fails, the trailing `Key: value` lines
+    # are not a trailer block (could be a marker-shaped subject,
+    # a body paragraph that happens to look trailer-y, etc.).
+    trailer_start = -1
+    if 0 < i < len(lines) and lines[i-1] == "":
+        j = i - 1
+        while j > 0 and lines[j-1] == "":
+            j -= 1
+        if j > 0:
+            trailer_start = i
+    # Pass 3 — emit body verbatim plus a filtered trailer block
+    # (Ccx-Task: T-X lines removed; all other trailers preserved
+    # since they do not contain task-id markers and the marker
+    # regex will not match them). If no real trailer block exists,
+    # emit the full message — every marker-shaped line stays
+    # visible to the regex.
+    ccx_task_re = re.compile(r"^Ccx-Task: T-[0-9]+\s*$")
+    if trailer_start >= 0:
+        body = lines[:trailer_start]
+        filtered_trailer = [l for l in lines[trailer_start:] if not ccx_task_re.match(l)]
+        out_lines = body + filtered_trailer
+        sys.stdout.write("\n".join(out_lines).rstrip("\n"))
+    else:
+        sys.stdout.write(msg.rstrip("\n"))
+except Exception as exc:
+    # Strip helper failed (e.g. non-UTF-8 commit message under a
+    # UTF-8 locale, regex engine crash, encoding error). Print
+    # NOTHING to stdout AND exit non-zero so the caller treats
+    # this as a fatal abort. Without this check, the caller would
+    # see empty NON_TRAILER_MSG, run the regex on empty text, see
+    # no match, and commit a potentially-tainted message.
+    sys.stderr.write("merge-boundary trailer-strip error: " + str(exc) + "\n")
+    sys.exit(2)
+')"
+           STRIP_RC=$?
+           if [ "$STRIP_RC" -ne 0 ]; then
+             # Trailer-strip helper failed — treat exactly like a
+             # regex-engine failure below: roll back and route to
+             # merge-aborted with the engine error in notes. We do
+             # NOT proceed to the regex check on an empty
+             # NON_TRAILER_MSG because that would silently mask
+             # leaks the strip helper failed to expose.
+             git restore --staged --worktree .
+             # Caller: append <task_id> to BLOCKED_IDS, stash
+             # exit_status: "merge-aborted",
+             # notes: "merge-boundary trailer-strip helper failed —
+             # fix python3 / commit-message encoding and re-run;
+             # see supervisor stderr for the error". Skip the regex
+             # check (and its commit branch) entirely.
+             :
+           else
+           # ----- TRAILER-STRIP SUCCEEDED — proceed to regex check -----
+           # NON_TRAILER_MSG now equals WORKER_FINAL_MSG verbatim with
+           # all Ccx-Task: T-X trailer lines removed. Everything else —
+           # subject, body paragraphs, other trailers (Co-Authored-By,
+           # Signed-off-by), and any marker-shaped final paragraph —
+           # stays visible to the marker regex below. T-6's reader-side
+           # `ccx verify` MUST mirror this same narrow strip rather
+           # than re-implementing a general "is this a trailer" parse,
+           # so the writer/reader contract stays symmetric.
+           #
+           # (Dogfood mode never reaches this block — the IS_DOGFOOD
+           # shortcut above committed the worker's message verbatim
+           # and skipped to the "Clean squash + commit succeeds"
+           # outcome without invoking python3 at all.)
+           #
+           # PORTABILITY — use Python (always available alongside the
+           # trailer-split helper above) rather than `grep -P`. PCRE
+           # support is GNU-specific; BSD grep (macOS default) exits
+           # non-zero with a usage error and the surrounding `if` would
+           # silently treat that as "no marker matched", letting a real
+           # leak slip through. The Python helper emits literal
+           # "1" / "0" to stdout for the match result AND propagates
+           # any unexpected error via a non-zero exit so a regex-engine
+           # crash surfaces as a fatal STOP rather than a silent pass.
+           HYGIENE_MATCH="$(printf '%s' "$NON_TRAILER_MSG" | python3 -c '
+import re, sys
+try:
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])(T-[0-9]+:|\[T-[0-9]+\]|\bT-[0-9]+\b|supervisor:\s*(dispatch|update board)?|ccx/)",
+        re.IGNORECASE,
+    )
+    sys.stdout.write("1" if pattern.search(sys.stdin.read()) else "0")
+except Exception as exc:
+    # Engine error — DO NOT swallow. Print nothing to stdout and exit
+    # non-zero so the calling shell treats this as a fatal abort
+    # rather than a "no-match" pass.
+    sys.stderr.write("merge-boundary regex engine error: " + str(exc) + "\n")
+    sys.exit(2)
+')"
+           HYGIENE_RC=$?
+           if [ "$HYGIENE_RC" -ne 0 ]; then
+             # Regex engine failed unexpectedly (Python missing, encoding
+             # error, etc.). Roll back the staged squash and STOP the
+             # whole run — silently treating the worker's message as
+             # marker-clean here would land a potentially-tainted commit
+             # on integration. Print the engine error verbatim so the
+             # operator can fix the environment and re-run.
+             git restore --staged --worktree .
+             # Fall through to outer caller: treat as `merge-aborted`
+             # with notes "merge-boundary regex engine failed — fix
+             # python3 availability and re-run; see supervisor stderr
+             # for the engine error". This is a per-task block (no
+             # STOP_DISPATCHING — other peers might use rebase strategy
+             # and not need the regex at all), but the supervisor's
+             # subsequent runs cannot proceed for this task until the
+             # engine is fixed.
+             :
+           elif [ "$HYGIENE_MATCH" = "1" ]; then
+             # We are inside the customer-mode hygiene block; dogfood
+             # short-circuited above. A "1" here unambiguously means a
+             # marker was found in the worker's non-trailer message.
+             # Marker regression: roll back the staged squash and classify
+             # the task as `leak-detected-at-merge`. The rollback is
+             # mandatory — the staged squash result holds the worker's
+             # tainted message in the index, and leaving it would either
+             # fall through to a later (also-rejected) commit attempt or
+             # bleed the marker subject into the NEXT iteration's merge.
+             git restore --staged --worktree .
+             # Caller path: append <task_id> to BLOCKED_IDS, stash BOARD
+             # update: status: "blocked", exit_status: "leak-detected-at-merge",
+             # notes: "worker commit subject regressed after T-3 retry
+             # budget. Branch ccx/<task_id> preserved for inspection.
+             # Recovery is operator-driven (Step A's stale-artifact gate
+             # refuses naive re-dispatch): pick (a) salvage — git commit
+             # --amend on ccx/<task_id> to fix the subject, merge into
+             # <INTEGRATION> by hand, mark this BOARD row 'merged'
+             # manually; or (b) discard — git worktree remove
+             # <meta.worktree_path>; git branch -D ccx/<task_id>; revise
+             # STATE_DIR/tasks/<task_id>.md's ## Decisions to seed
+             # marker-strip guidance; flip BOARD status to pending so
+             # the next supervisor run dispatches a fresh worker. See
+             # STATE_DIR/workers/<task_id>.log for the worker's three
+             # rewrite attempts." Branch is preserved for inspection per
+             # the T-2 contract (no `git branch -D` fires on this
+             # blocked exit). Do NOT set STOP_DISPATCHING — the
+             # regression is per-task, not per-pipeline.
+             :
+           else
+             # Write the worker's final message to a temp file and commit
+             # with `-F` so multi-line bodies + trailers land verbatim
+             # without shell-quoting hazards. Capture the commit exit
+             # status (a commit-msg hook, signing failure, branch
+             # protection, etc. could reject the commit even though the
+             # squash and the merge-boundary regex both passed). On
+             # non-zero, fall through to the "Clean merge but commit
+             # fails" / `merge-commit-failed` outcome below; the staged
+             # squash result must be rolled back so the next iteration's
+             # `git status --porcelain` cleanliness assert does not see
+             # a stale staged tree.
+             MERGE_MSG_FILE="$(mktemp)"
+             printf '%s' "$WORKER_FINAL_MSG" > "$MERGE_MSG_FILE"
+             COMMIT_STDERR="$(git commit -F "$MERGE_MSG_FILE" 2>&1 1>/dev/null)"
+             COMMIT_RC=$?
+             rm -f "$MERGE_MSG_FILE"
+             if [ "$COMMIT_RC" -ne 0 ]; then
+               git restore --staged --worktree .
+               # Caller: append <task_id> to BLOCKED_IDS, stash
+               # exit_status: "merge-commit-failed", notes carries
+               # COMMIT_STDERR's first 200 chars. The full
+               # merge-commit-failed recovery sidecar logic in the
+               # outcome description below applies (STOP_DISPATCHING
+               # set, sidecar written, etc.).
+               :
+             fi
+             # Otherwise falls into the "Clean squash + commit succeeds"
+             # outcome. Step B step 5's worker-finish cleanup will run
+             # worktree removal AND branch deletion (T-4 contract) for
+             # this merged exit.
+           fi
+           fi   # closes `if [ "$STRIP_RC" -ne 0 ]; then ... else <regex+commit> fi`
+           # ----- END CUSTOMER-MODE HYGIENE BLOCK -----
+           fi   # closes `if [ "$IS_DOGFOOD" = "true" ]; then ... else <hygiene block> fi`
+         else
+           # Conflict: capture file list and roll back the staged squash.
+           CONFLICT_FILES="$(git ls-files -u | awk '{print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')"
+           git restore --staged --worktree .
+         fi
+       else
+         # Non-zero from --squash. Two sub-cases share this branch and must
+         # be distinguished BEFORE the rollback wipes the unmerged index:
+         #   (a) a normal content conflict — squash leaves stage-2/3 entries
+         #       in the index AND exits non-zero; this is the common case
+         #       and must be classified as `merge-conflict`, not
+         #       `merge-aborted`.
+         #   (b) a true refusal (pre-merge hook rejection, branch protection
+         #       blocking the staged write, unreachable object) — no
+         #       unmerged paths, exit non-zero; this is `merge-aborted`.
+         # Inspect `git ls-files -u` first; only wipe afterwards. The
+         # rollback is idempotent regardless of which sub-case we hit.
+         UNMERGED="$(git ls-files -u)"
+         if [ -n "$UNMERGED" ]; then
+           CONFLICT_FILES="$(echo "$UNMERGED" | awk '{print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')"
+         else
+           CONFLICT_FILES=""
+         fi
+         git restore --staged --worktree .
+         # Caller branches on CONFLICT_FILES: non-empty → "Conflict"
+         # outcome; empty → "Non-conflict squash refusal" outcome (single
+         # in-iteration retry, then merge-aborted if it persists).
+       fi
+       ;;
+
+     rebase)
+       # --- REBASE STRATEGY (customer + dogfood opt-in) ---
+       # The rebase happens on the worker branch (replays worker commits on
+       # top of integration), then a fast-forward merge from integration
+       # advances HEAD without producing a merge commit. The supervisor
+       # MUST run the rebase from inside the worker's worktree path — the
+       # rebase mutates HEAD on `ccx/<task_id>`, and trying to rebase a
+       # branch that is checked out in another worktree errors with
+       # `fatal: 'ccx/<task_id>' is already used by worktree at ...`. Use
+       # `git -C "<meta.worktree_path>"` rather than `cd` so the
+       # supervisor's own cwd (the integration checkout) stays intact for
+       # the subsequent `git merge --ff-only`.
+       REBASE_STDERR="$(git -C "<meta.worktree_path>" rebase "<INTEGRATION>" 2>&1 1>/dev/null)"
+       REBASE_RC=$?
+       if [ "$REBASE_RC" -ne 0 ]; then
+         # Conflict during replay. `git rebase --abort` is mandatory per
+         # the brief's Decisions ("Don't auto-resolve. Conflict resolution
+         # belongs to a separate task / human review."). The abort
+         # restores the worker branch and its index to the pre-rebase
+         # state — there is no in-flight rebase to "resume in place"
+         # after this point. The worker branch sits at its original tip
+         # (the same tip Step B step 1 verified as the worker's last
+         # commit), and the worktree's index/working-copy reflect that
+         # tip with NO conflict markers. The operator's recovery path
+         # is therefore a FRESH `git rebase <INTEGRATION>` from inside
+         # the preserved worktree, where they can resolve conflicts as
+         # they re-arise — not "edit existing conflict markers in
+         # place".
+         git -C "<meta.worktree_path>" rebase --abort 2>/dev/null || true
+         # Capture file list for the notes string. After --abort the index
+         # is clean again, so query the worker branch's diff against the
+         # integration tip to enumerate likely conflict points.
+         CONFLICT_FILES="$(git -C "<meta.worktree_path>" diff --name-only "<INTEGRATION>...ccx/<task_id>" | sort -u | tr '\n' ',' | sed 's/,$//')"
+         # Caller path: append <task_id> to BLOCKED_IDS, stash BOARD
+         # update: status: "blocked", exit_status: "rebase-conflict",
+         # notes: "git rebase aborted after replay conflict on ccx/<task_id>
+         # (likely conflicting paths: <CONFLICT_FILES, first 200 chars>).
+         # Worker branch and worktree preserved at the pre-rebase tip.
+         # Recovery is operator-driven — Step A's stale-artifact gate
+         # would refuse a naive re-run, so pick ONE: (a) resolve + merge
+         # by hand — cd <meta.worktree_path>; git rebase <INTEGRATION>;
+         # resolve conflicts; merge into <INTEGRATION> by hand; then
+         # mark this BOARD row 'merged' manually (the supervisor will
+         # NOT pick this up automatically because the preserved branch
+         # would trip the stale-artifact gate); (b) discard — git
+         # worktree remove --force <meta.worktree_path>; git branch -D
+         # ccx/<task_id>; flip BOARD status to pending so the next
+         # supervisor run dispatches a fresh worker. See <first 200
+         # chars of REBASE_STDERR> for the original rebase output."
+         # Branch and worktree are both preserved for human triage (no
+         # `git branch -D`, no worktree removal — Step B step 5's
+         # worker-finish cleanup is bypassed for this exit_status; see
+         # step 5's reachable-outcomes list).
+         :
+       else
+         # Rebase succeeded. Fast-forward integration to ccx/<task_id>'s
+         # new tip. --ff-only refuses to create a merge commit if the
+         # FF is impossible — possible failure modes even after a clean
+         # rebase: a concurrent supervisor or hook advanced INTEGRATION
+         # between the rebase and this FF (race window), a pre-merge
+         # hook on INTEGRATION rejects the FF advance, or a
+         # branch-protection rule enforces signed merges on every
+         # update. Capture the exit code so the success path is NOT
+         # taken on FF failure — otherwise the task would be recorded
+         # as merged and Step B step 5 would delete `ccx/<task_id>`
+         # even though no worker commit reached integration.
+         FF_STDERR="$(git merge --ff-only "ccx/<task_id>" 2>&1 1>/dev/null)"
+         FF_RC=$?
+         if [ "$FF_RC" -eq 0 ]; then
+           # Falls into the "Clean merge + commit succeeds" outcome
+           # (multiple commits on integration, one per preserved worker
+           # commit). Step B step 5's cleanup applies as for squash.
+           :
+         else
+           # FF failed despite a clean rebase. Capture the conflict
+           # picture (the rebased worker branch sits ahead of the
+           # current integration tip; a non-ff push would have been
+           # needed) and classify identically to a squash "Non-conflict
+           # squash refusal" so the in-iteration retry pattern above
+           # applies. The worker branch is in a CLEAN rebased state at
+           # this point — DO NOT roll back the rebase, the rebased tip
+           # is the artifact the operator needs to retry the FF later.
+           CONFLICT_FILES=""        # No file-level conflict — pure refusal
+           MERGE_STDERR_1="$FF_STDERR"
+           # Fall through to the shared "Non-conflict merge refusal"
+           # outcome below, which fires the single in-iteration retry
+           # (just the FF — the rebase already landed). If the retry
+           # ALSO fails, the task blocks as merge-aborted with the FF
+           # stderr in notes; the worker branch's rebased tip stays
+           # intact for manual merge.
+         fi
+       fi
+       ;;
+
+     merge)
+       # --- MERGE STRATEGY (dogfood only, legacy path) ---
+       # P0 step 1a's resolver STOPped every customer-mode run before this
+       # branch could fire. The --no-ff merge produces Git's default
+       # `Merge branch 'ccx/<task_id>'` subject — exactly the dogfood
+       # narrative invariant 4 reserves for dogfood mode.
+       if git merge --no-ff --no-edit "ccx/<task_id>"; then
+         # Clean merge — `git merge --no-ff` creates the merge commit
+         # directly (unlike --squash, which stages without committing), so
+         # no follow-up `git commit` is needed and the "Clean squash +
+         # commit succeeds" classifier branch applies. Step B step 5's
+         # cleanup contract applies identically — worktree removed,
+         # branch deleted unconditionally per T-4.
+         :
+       else
+         # Conflict. `git merge --abort` is the right rollback (parallel
+         # to --squash's `git restore --staged --worktree .` — both
+         # restore the integration checkout to its pre-merge HEAD).
+         UNMERGED="$(git ls-files -u)"
+         if [ -n "$UNMERGED" ]; then
+           CONFLICT_FILES="$(echo "$UNMERGED" | awk '{print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')"
+         else
+           CONFLICT_FILES=""
+         fi
+         git merge --abort 2>/dev/null || git restore --staged --worktree .
+         # Caller branches identically to the squash strategy: non-empty
+         # CONFLICT_FILES → "Conflict" outcome; empty → "Non-conflict
+         # squash refusal" outcome (the label is squash-specific but the
+         # semantics generalise — a non-conflict merge refusal is the
+         # same shape: pre-merge hook rejection, branch protection,
+         # unreachable object).
+         :
+       fi
+       ;;
+   esac
    ```
 
-   Squash semantics relevant to the algorithm above:
-   - `git merge --squash` does NOT set `MERGE_HEAD` and does NOT create a commit. There is no `git merge --abort` equivalent because no merge state exists; rollback is `git restore --staged --worktree .`, which reverts the index AND the worktree to `HEAD`. The pre-merge cleanliness assert is what makes that safe — we know there are no other uncommitted changes to lose.
-   - File-level conflicts during squash leave the index in a stage-2/3 state (the same `git ls-files -u` surface as a regular merge conflict). The squash exit code is non-zero but the worktree has the conflict markers written; restore wipes both.
-   - `git restore --staged --worktree .` is the recommended rollback (preserves branch ref semantics; never moves `HEAD`); `git reset --hard` is rejected because it is more aggressive than needed and would also discard reflog-recoverable state that human triage might want.
+   Strategy-specific semantics relevant to the algorithm above:
+   - **squash:** `git merge --squash` does NOT set `MERGE_HEAD` and does NOT create a commit. There is no `git merge --abort` equivalent because no merge state exists; rollback is `git restore --staged --worktree .`, which reverts the index AND the worktree to `HEAD`. The pre-merge cleanliness assert is what makes that safe — we know there are no other uncommitted changes to lose. File-level conflicts during squash leave the index in a stage-2/3 state (the same `git ls-files -u` surface as a regular merge conflict). The squash exit code is non-zero but the worktree has the conflict markers written; restore wipes both. `git restore --staged --worktree .` is the recommended rollback (preserves branch ref semantics; never moves `HEAD`); `git reset --hard` is rejected because it is more aggressive than needed and would also discard reflog-recoverable state that human triage might want. T-4's merge-boundary regex check (above) re-applies the T-3 marker-strip pattern to the worker's final commit message before the squash commit is created; a regression aborts via the same `git restore --staged --worktree .` rollback path.
+   - **rebase:** `git rebase` mutates HEAD on the worker branch (`ccx/<task_id>`) and MUST run inside the worker's worktree (`git -C "<meta.worktree_path>" rebase ...`); attempting to rebase a branch checked out in another worktree errors with `fatal: 'ccx/<task_id>' is already used by worktree at ...`. The supervisor's own integration checkout stays untouched during the rebase phase; the subsequent `git merge --ff-only` runs from the integration checkout. On conflict, `git rebase --abort` is mandatory (parallels squash's `git restore --staged --worktree .`); the worker branch returns to its pre-rebase tip and the operator can `git checkout ccx/<task_id>` to resolve manually. The supervisor never attempts auto-resolution.
+   - **merge** (dogfood only): `git merge --no-ff` creates the merge commit directly with Git's default `Merge branch 'ccx/<task_id>'` subject. `git merge --abort` is the rollback (in contrast to the other strategies, `--no-ff` sets `MERGE_HEAD` until the commit is finalised). The dogfood `merge` strategy preserves the legacy pre-T-4 history shape verbatim.
 
-   Four outcomes (numbered for clarity; the squash version of M4's conflict-detection-before-commit-creation contract):
+   Six outcomes (numbered for clarity; the strategy-dispatcher generalisation of M4's conflict-detection-before-commit-creation contract — the original four squash-only outcomes plus the two T-4 additions):
 
-   - **Clean squash + commit succeeds** (`git merge --squash` exit 0 AND `git ls-files -u` empty AND `git commit` exit 0 AND `HEAD` moved): `MERGED_COUNT += 1`, append `task_id` to `MERGED_IDS`, stash a BOARD-row update in memory: `status: "merged"`, `finished_at: "<now>"`, `exit_status: "approved"`. Do NOT commit BOARD yet — step D batches all BOARD updates into one commit. The commit subject `T-<task_id>: <task_title>` keeps task identity in the first line of the integration history (replacing what `--no-ff`'s implicit `Merge branch ccx/T-<id>` subject used to provide).
-   - **Conflict** (`git ls-files -u` non-empty before the rollback, regardless of whether `git merge --squash` exited 0 or non-zero — both shapes occur in practice: squash exits 0 with stage-2/3 entries when only some paths conflict, and exits non-zero when the conflict prevents finishing). Capture `CONFLICT_FILES` **before** running `git restore` — once restore runs, the unmerged index is gone and `git ls-files -u` returns empty. Use `awk '{print $4}'` (the path column from `ls-files -u`'s stage output) and `sort -u` because conflicted paths appear up to three times (one per stage). Append `task_id` to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `exit_status: "merge-conflict"`, `notes: "conflict on <CONFLICT_FILES, comma-separated>"`. The worker branch stays intact — the human resolves manually.
-   - **Non-conflict squash refusal** (`git merge --squash` exit non-zero AND `git ls-files -u` empty before the rollback — i.e. `CONFLICT_FILES` came back empty in the else branch above): Git refused the squash for a reason other than file-level conflicts — examples include a `pre-merge-commit` hook rejecting the staged-but-uncommitted state, a branch protection / signed-merge requirement that fails up front, or an unreachable / corrupt object on the worker branch. Some of these are **transient** (`.git/index.lock` released by an exiting peer process, a temporary network blip while resolving the worker branch); others are **permanent** for this run (signed-merge requirement, branch-protection rule, hook that inspects merge content). The supervisor cannot reliably classify these from stderr alone, so it does **one in-iteration retry** before declaring the task permanently blocked.
+   - **Clean merge + commit succeeds** (the unified happy path for every strategy — for squash: `git merge --squash` exit 0 AND `git ls-files -u` empty AND T-4 merge-boundary regex passes AND `git commit -F <message-file>` exit 0 AND `HEAD` moved; for rebase: `git -C "<meta.worktree_path>" rebase` exit 0 AND `git merge --ff-only` exit 0 AND `HEAD` moved; for the dogfood `merge` strategy: `git merge --no-ff` exit 0 AND `HEAD` moved): `MERGED_COUNT += 1`, append `task_id` to `MERGED_IDS`, stash a BOARD-row update in memory: `status: "merged"`, `finished_at: "<now>"`, `exit_status: "approved"`. Do NOT commit BOARD yet — step D batches all BOARD updates into one commit. **The commit subject depends on the strategy** (T-4): squash → the worker's final commit subject verbatim (T-3-processed; NO `T-<id>:` prefix per invariant 3); rebase → each individual worker commit's subject preserved as its own commit (each subject is already T-3-processed at worker time); merge (dogfood only) → Git's default `Merge branch 'ccx/<task_id>'` (the legacy dogfood-narrative subject that invariant 4 reserves for dogfood mode).
+   - **Conflict** (squash and dogfood-merge: `git ls-files -u` non-empty before the rollback, regardless of whether the merge exited 0 or non-zero — both shapes occur in practice: squash exits 0 with stage-2/3 entries when only some paths conflict, and exits non-zero when the conflict prevents finishing; rebase does NOT take this branch — see the dedicated `rebase-conflict` outcome below). Capture `CONFLICT_FILES` **before** running `git restore` / `git merge --abort` — once the rollback runs, the unmerged index is gone and `git ls-files -u` returns empty. Use `awk '{print $4}'` (the path column from `ls-files -u`'s stage output) and `sort -u` because conflicted paths appear up to three times (one per stage). Append `task_id` to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `exit_status: "merge-conflict"`, `notes: "conflict on <CONFLICT_FILES, comma-separated>"`. The worker branch stays intact — the human resolves manually. Step B step 5's worker-finish cleanup runs the worktree removal but SKIPS T-4's branch delete on this blocked exit (branch preserved for human triage).
+   - **Leak detected at merge** (T-4, squash strategy in CUSTOMER MODE only — `IS_DOGFOOD == false` AND `git merge --squash` exit 0 AND `git ls-files -u` empty AND the T-4 merge-boundary regex matched a tooling marker in the worker's final commit message): the worker's commit subject regressed after the T-3 retry budget (rare — usually a model regression on a lower rung or a worker that ran T-3 incompletely). This outcome is UNREACHABLE in dogfood mode — the regex is skipped there (worker bypassed T-3 per §18.2.6 and `T-X:` subjects are the documented dogfood narrative). The rollback (`git restore --staged --worktree .`) already fired inside the strategy dispatcher. Append `task_id` to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `exit_status: "leak-detected-at-merge"`, `notes: "worker commit subject regressed at merge boundary — T-3's three-retry budget burned without producing a marker-clean message. Branch ccx/<task_id> preserved for inspection. Recovery is operator-driven (Step A's stale-artifact gate refuses to re-dispatch onto an existing branch): (a) salvage — git commit --amend on ccx/<task_id> to fix the subject, merge into <INTEGRATION> by hand (squash or rebase-then-ff), then mark this BOARD row 'merged' manually; or (b) discard — git worktree remove <meta.worktree_path>; git branch -D ccx/<task_id>; revise STATE_DIR/tasks/<task_id>.md's ## Decisions to seed marker-strip guidance, then flip BOARD status to pending and re-run. See STATE_DIR/workers/<task_id>.log for the worker's three rewrite attempts."`. Do NOT set `STOP_DISPATCHING` — the regression is per-task. The branch is preserved for inspection (Step B step 5 skips T-4's branch delete on this blocked exit). Supervisor-side auto-routing of this exit into §P2.5's stuck-flavored signal set is OUT of T-4's scope per the "Out of scope for T-4" deferral list in the resolver section above — operator-driven recovery (option (a) or option (b) above) is the documented path for now (same deferral pattern T-3's `commit-marker-leak` follows).
+   - **Rebase conflict** (T-4, rebase strategy only — `git -C "<meta.worktree_path>" rebase "<INTEGRATION>"` exit non-zero AND the supervisor ran `git rebase --abort` inside the worker worktree): Git could not replay one or more worker commits on top of the integration tip without conflicts. The abort restored the worker branch and the worktree's index to the PRE-rebase state — there is no in-flight rebase to resume after this point, and no conflict markers in the worktree files. `CONFLICT_FILES` was captured by enumerating the worker branch's diff against the integration tip post-abort (`git -C "<meta.worktree_path>" diff --name-only "<INTEGRATION>...ccx/<task_id>"`, since the unmerged index was already cleared by `--abort`). Append `task_id` to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `exit_status: "rebase-conflict"`, `notes: "git rebase aborted after replay conflict on ccx/<task_id> (likely paths: <CONFLICT_FILES, first 200 chars>). Worker branch and worktree preserved at pre-rebase tip. Recovery is operator-driven (Step A's stale-artifact gate refuses to re-dispatch onto an existing branch or worktree): (a) resolve in place — cd <meta.worktree_path>; git rebase <INTEGRATION>; resolve conflicts as Git re-surfaces them; then merge into <INTEGRATION> by hand (the supervisor's next run cannot pick this up — it would also be blocked by the stale-artifact gate); mark this BOARD row 'merged' manually after the hand-merge. (b) discard — git worktree remove --force <meta.worktree_path>; git branch -D ccx/<task_id>; flip BOARD status to pending and re-run (the supervisor will dispatch a fresh worker that re-implements from scratch). See <first 200 chars of REBASE_STDERR>."`. The worker branch AND worktree are both preserved for human triage (Step B step 5 skips BOTH the worktree-remove and the T-4 branch-delete on this blocked exit). Do NOT set `STOP_DISPATCHING` — like `merge-conflict`, this is per-task, not per-pipeline. Auto-routing into §P2.5 is deferred per the "Out of scope for T-4" list (auto-resolving rebase conflicts is explicitly rejected by the brief's Decisions section, AND adding an "adopt the preserved branch" path to Step A is itself out of scope here).
+   - **Non-conflict merge refusal** (the strategy dispatcher's merge primitive exited non-zero AND `git ls-files -u` empty before the rollback — i.e. `CONFLICT_FILES` came back empty in the strategy's else branch): Git refused the merge for a reason other than file-level conflicts — examples include a `pre-merge-commit` hook rejecting the staged-but-uncommitted state, a branch protection / signed-merge requirement that fails up front, or an unreachable / corrupt object on the worker branch. Some of these are **transient** (`.git/index.lock` released by an exiting peer process, a temporary network blip while resolving the worker branch); others are **permanent** for this run (signed-merge requirement, branch-protection rule, hook that inspects merge content). The supervisor cannot reliably classify these from stderr alone, so it does **one in-iteration retry** before declaring the task permanently blocked. The retry semantics are strategy-specific — the squash retry below is the canonical shape because it covers the most common dispatch path; rebase retries are NOT attempted (a rebase that aborts because of a conflict is captured by the dedicated `rebase-conflict` outcome above, and a rebase that exits non-zero without conflicts is rare enough that re-running the rebase in the same iteration is unlikely to help); dogfood `merge` retries follow the squash retry shape verbatim with `git merge --no-ff` substituted for `git merge --squash`.
 
-     Capture the verbatim stderr from the failed `git merge --squash` call (call it `MERGE_STDERR_1`) before running the rollback. The unconditional `git restore --staged --worktree .` above already cleared any partial squash state. Then attempt the merge ONCE more, immediately, in the same Step B iteration:
+     Capture the verbatim stderr from the failed merge call (call it `MERGE_STDERR_1`) before running the rollback. The unconditional `git restore --staged --worktree .` (squash) or `git merge --abort` (dogfood merge) above already cleared any partial state. Then attempt the merge ONCE more, immediately, in the same Step B iteration, using the **same strategy primitive that fired originally** — branch the retry on `MERGE_STRATEGY` so a rebase or dogfood-merge retry does NOT silently fall back to squash (that would violate the configured strategy AND, for rebase, discard the per-commit history the strategy is meant to preserve). The shape per strategy:
+
+     - **`squash`** — re-attempt `git merge --squash` exactly as the canonical retry below. If the retry succeeds, run the same trailer-strip + regex + commit pipeline as the first attempt (including the dogfood-shortcut + customer-mode hygiene branches).
+     - **`rebase`** — re-attempt the FF half only (`git -C "<meta.worktree_path>" rebase` already landed before the FF failed on the first attempt; the rebased tip is intact, so retrying the FF alone is the right scope). Run `git merge --ff-only "ccx/<task_id>"`; on retry success, falls into "Clean merge + commit succeeds" with the rebased commits preserved; on retry failure, classify per the success/conflict/refusal branches below.
+     - **`merge`** (dogfood only) — re-attempt `git merge --no-ff --no-edit "ccx/<task_id>"`. No-ff produces the merge commit atomically, so no separate commit step is needed on the success path.
+
+     The canonical squash-strategy retry shape:
 
      ```bash
-     # Single in-iteration retry. Any locks that the first restore cleared
-     # will not block the retry; permanent rejections will surface again.
-     # Both branches inspect `git ls-files -u` BEFORE the rollback so a
-     # non-zero exit caused by a content conflict (the common shape) is
-     # still classified as merge-conflict, not merge-aborted.
+     # Single in-iteration retry — squash-strategy shape. Dogfood
+     # merge-strategy and rebase-strategy retries follow the same
+     # `if <primitive> ... ls-files -u ... rollback` skeleton with
+     # the primitive substituted (see the per-strategy bullets above).
+     #
+     # Any locks that the first rollback cleared will not block the retry;
+     # permanent rejections will surface again. Both branches inspect
+     # `git ls-files -u` BEFORE the rollback so a non-zero exit caused by
+     # a content conflict (the common shape) is still classified as
+     # merge-conflict, not merge-aborted.
      if git merge --squash --no-edit "ccx/<task_id>"; then
        UNMERGED_2="$(git ls-files -u)"
        if [ -z "$UNMERGED_2" ]; then
-         # Same worker-log preservation as the first-attempt clean path
-         # above so M3 Tier-3 history scans still hit a worker rationale
-         # even when the merge took the retry branch.
-         WORKER_LOG="$(git log --no-merges --reverse --format='--- %h %s%n%b' "<INTEGRATION>..ccx/<task_id>")"
-         git commit -m "T-<task_id>: <task_title>" -m "Worker commits squashed into this merge:" -m "$WORKER_LOG"
-         # Falls into the "Clean squash + commit succeeds" outcome.
+         # Re-apply the T-4 merge-boundary regex check (same gate the
+         # first-attempt path ran). A retry of a clean squash that
+         # somehow ALSO regresses the worker's commit subject is
+         # vanishingly unlikely but the writer/reader contract requires
+         # the check on every commit, not just the first attempt. Same
+         # trailer-split as the first attempt (use the Python helper
+         # above verbatim — do NOT pretend NON_TRAILER_MSG equals the
+         # raw message, that would silently false-reject every commit
+         # carrying a Ccx-Task: T-X trailer). Same rollback +
+         # leak-detected-at-merge classification applies as the first
+         # attempt's regex hit.
+         WORKER_FINAL_MSG="$(git log -1 --format=%B "ccx/<task_id>")"
+         # Mirror the first attempt's dogfood shortcut. The retry MUST
+         # bypass the trailer-split + regex helpers entirely in dogfood
+         # mode so a missing python3 / helper crash cannot block a
+         # dogfood retry that should commit the worker message
+         # verbatim per §18.2.6. Same commit-failure check as the first
+         # attempt (a commit hook could reject the retry commit too).
+         if [ "$IS_DOGFOOD" = "true" ]; then
+           MERGE_MSG_FILE="$(mktemp)"
+           printf '%s' "$WORKER_FINAL_MSG" > "$MERGE_MSG_FILE"
+           COMMIT_STDERR="$(git commit -F "$MERGE_MSG_FILE" 2>&1 1>/dev/null)"
+           COMMIT_RC=$?
+           rm -f "$MERGE_MSG_FILE"
+           if [ "$COMMIT_RC" -ne 0 ]; then
+             git restore --staged --worktree .
+             # Caller: merge-commit-failed outcome (see below).
+             :
+           fi
+         else
+         # ----- CUSTOMER-MODE HYGIENE BLOCK (RETRY) -----
+         # Same surgical Ccx-Task-only strip as the first attempt with
+         # the same exit-status capture so a strip-helper failure
+         # cannot silently produce an empty NON_TRAILER_MSG that the
+         # regex would pass through (see the long comment block in the
+         # first-attempt block above).
+         NON_TRAILER_MSG="$(printf '%s' "$WORKER_FINAL_MSG" | python3 -c '
+import re, sys
+try:
+    msg = sys.stdin.read()
+    lines = msg.rstrip("\n").split("\n")
+    trailer_key_re = re.compile(r"^[A-Za-z][A-Za-z0-9-]*: ")
+    i = len(lines)
+    while i > 0 and trailer_key_re.match(lines[i-1]):
+        i -= 1
+    trailer_start = -1
+    if 0 < i < len(lines) and lines[i-1] == "":
+        j = i - 1
+        while j > 0 and lines[j-1] == "":
+            j -= 1
+        if j > 0:
+            trailer_start = i
+    ccx_task_re = re.compile(r"^Ccx-Task: T-[0-9]+\s*$")
+    if trailer_start >= 0:
+        body = lines[:trailer_start]
+        filtered_trailer = [l for l in lines[trailer_start:] if not ccx_task_re.match(l)]
+        out_lines = body + filtered_trailer
+        sys.stdout.write("\n".join(out_lines).rstrip("\n"))
+    else:
+        sys.stdout.write(msg.rstrip("\n"))
+except Exception as exc:
+    sys.stderr.write("merge-boundary trailer-strip error: " + str(exc) + "\n")
+    sys.exit(2)
+')"
+         STRIP_RC_2=$?
+         if [ "$STRIP_RC_2" -ne 0 ]; then
+           # Trailer-strip failed — same fatal classification as the
+           # first attempt's STRIP_RC -ne 0 branch above. Roll back
+           # and route to merge-aborted with the engine error in notes.
+           git restore --staged --worktree .
+           :
+         else
+         # Customer-mode Python-engine check (BSD grep silently
+         # bypasses `grep -P`; Python is portable). Dogfood mode never
+         # reaches this — the IS_DOGFOOD shortcut above committed the
+         # worker's message verbatim.
+         HYGIENE_MATCH_2="$(printf '%s' "$NON_TRAILER_MSG" | python3 -c '
+import re, sys
+try:
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])(T-[0-9]+:|\[T-[0-9]+\]|\bT-[0-9]+\b|supervisor:\s*(dispatch|update board)?|ccx/)",
+        re.IGNORECASE,
+    )
+    sys.stdout.write("1" if pattern.search(sys.stdin.read()) else "0")
+except Exception as exc:
+    sys.stderr.write("merge-boundary regex engine error: " + str(exc) + "\n")
+    sys.exit(2)
+')"
+         HYGIENE_RC_2=$?
+         if [ "$HYGIENE_RC_2" -ne 0 ]; then
+           # Regex engine failed — same fatal classification as the
+           # first attempt's HYGIENE_RC -ne 0 branch above. Roll back
+           # and treat as merge-aborted with the engine error in notes.
+           git restore --staged --worktree .
+           :
+         elif [ "$HYGIENE_MATCH_2" = "1" ]; then
+           git restore --staged --worktree .
+           # Falls into the "Leak detected at merge" outcome above.
+         else
+           MERGE_MSG_FILE="$(mktemp)"
+           printf '%s' "$WORKER_FINAL_MSG" > "$MERGE_MSG_FILE"
+           COMMIT_STDERR="$(git commit -F "$MERGE_MSG_FILE" 2>&1 1>/dev/null)"
+           COMMIT_RC=$?
+           rm -f "$MERGE_MSG_FILE"
+           if [ "$COMMIT_RC" -ne 0 ]; then
+             git restore --staged --worktree .
+             # Caller: merge-commit-failed outcome (see below).
+             :
+           fi
+           # Otherwise falls into the "Clean merge + commit succeeds" outcome.
+         fi
+         fi   # closes `if [ "$STRIP_RC_2" -ne 0 ]; then ... else <regex+commit> fi`
+         # ----- END CUSTOMER-MODE HYGIENE BLOCK (RETRY) -----
+         fi   # closes `if [ "$IS_DOGFOOD" = "true" ]; then ... else <hygiene block> fi`
        else
          CONFLICT_FILES_2="$(echo "$UNMERGED_2" | awk '{print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')"
          git restore --staged --worktree .
@@ -634,12 +1248,12 @@ For each `(task_id, meta)` in `RUNNING`:
      ```
 
      Three terminal states from the retry:
-     1. **Retry succeeds** (clean squash + commit): treat exactly like the "Clean squash + commit succeeds" outcome above (`MERGED_COUNT += 1`, append to `MERGED_IDS`, stash `status: "merged" / exit_status: "approved"`). Do NOT add a `notes` entry mentioning the first-attempt failure — the merge is in the integration history at this point; a "we retried" note is reflog territory, not BOARD-row territory.
+     1. **Retry succeeds** (clean merge + commit): treat exactly like the "Clean merge + commit succeeds" outcome above (`MERGED_COUNT += 1`, append to `MERGED_IDS`, stash `status: "merged" / exit_status: "approved"`). Do NOT add a `notes` entry mentioning the first-attempt failure — the merge is in the integration history at this point; a "we retried" note is reflog territory, not BOARD-row territory.
      2. **Retry conflicts** (`UNMERGED_2` non-empty): the first attempt's transient cause cleared, exposing a real file-level conflict. Treat exactly like the "Conflict" outcome above (`status: "blocked" / exit_status: "merge-conflict" / notes: "conflict on <CONFLICT_FILES_2, comma-separated>"`).
-     3. **Retry refuses again** (squash exit non-zero AND `git ls-files -u` empty after rollback): the rejection is permanent for this run. Append `task_id` to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `exit_status: "merge-aborted"`, `notes: "git merge --squash refused without conflicts (retried once): <first 200 chars of MERGE_STDERR_2, single-line>"`. Do NOT set `STOP_DISPATCHING` here — `merge-aborted` is per-merge, not per-supervisor; if a subsequent peer's merge also hits the same refusal, the same handler fires again and the human sees a pattern in P3. The worker branch stays intact for manual investigation.
+     3. **Retry refuses again** (merge exit non-zero AND `git ls-files -u` empty after rollback): the rejection is permanent for this run. Append `task_id` to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `exit_status: "merge-aborted"`, `notes: "git merge (<MERGE_STRATEGY>) refused without conflicts (retried once): <first 200 chars of MERGE_STDERR_2, single-line>"`. Do NOT set `STOP_DISPATCHING` here — `merge-aborted` is per-merge, not per-supervisor; if a subsequent peer's merge also hits the same refusal, the same handler fires again and the human sees a pattern in P3. The worker branch stays intact for manual investigation.
 
      Why a single in-iteration retry rather than re-queuing for the next Step B iteration: re-queuing would require a new "approved-but-not-yet-merged" state alongside `RUNNING` and `BLOCKED_IDS`, which complicates exit-condition reasoning and could mask a permanent failure as "the supervisor will get to it eventually". A single immediate retry catches the specific transient causes documented above (locks released within milliseconds) without inventing a new state. Failures that need more than seconds to clear are correctly classified as `merge-aborted` and surfaced for human triage.
-   - **Clean squash but commit fails** (pre-commit hook rejects the merge, signing failure, etc.): the index + worktree still hold a successful squash result that was never committed. Run `git restore --staged --worktree .` to wipe both back to `HEAD` — leaving the staged squash around would make the next iteration's `git merge --squash` refuse to overlay onto a dirty tree (and the cleanliness assert would refuse first). Append `task_id` to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `exit_status: "merge-commit-failed"`, `notes: "merge squash clean but commit failed — see supervisor stderr"`. Then handle the **likely Step D commit failure** synchronously, before STOPping the run:
+   - **Clean merge but commit fails** (squash strategy only — pre-commit hook rejects the merge, signing failure, etc.; the rebase strategy's `git merge --ff-only` does not run a fresh commit through hooks, and the dogfood `merge` strategy's `git merge --no-ff` commits and rejects atomically — that case is classified as the "Non-conflict merge refusal" outcome above): the index + worktree still hold a successful squash result that was never committed. Run `git restore --staged --worktree .` to wipe both back to `HEAD` — leaving the staged squash around would make the next iteration's `git merge --squash` refuse to overlay onto a dirty tree (and the cleanliness assert would refuse first). Append `task_id` to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `exit_status: "merge-commit-failed"`, `notes: "merge squash clean but commit failed — see supervisor stderr"`. Then handle the **likely Step D commit failure** synchronously, before STOPping the run:
 
      The same condition that rejected the merge commit (broken pre-commit hook, signing key absent, integration-branch protection, etc.) is overwhelmingly likely to reject the Step D batch BOARD commit too. If Step D fails after the merge-commit-failed branch fires, the in-memory `status: "blocked"` update is lost from the repo — `BOARD.md` stays at `status: "assigned"`, and every future supervisor run skips this task (P1 step 3 excludes `assigned` from `PENDING_POOL`). To avoid stranding the row:
 
@@ -688,7 +1302,7 @@ For each `(task_id, meta)` in `RUNNING`:
 
      5. **Final P3 report** prints the absolute sidecar path when the file still exists at exit, plus a one-line summary of how many tasks blocked with `merge-commit-failed`. Omit the sidecar-path line entirely when Step D succeeded and the sidecar was deleted in step 4 above.
 
-   The dry-run does NOT replace the abort-on-conflict guarantee — `CONFLICT_FILES` MUST be captured before any rollback. The squash dry-run leaves a bounded "clean merge staged but not yet committed" window; that window MUST be closed by either `git commit -m "T-<task_id>: <task_title>"` (the only intentional persistence path) or `git restore --staged --worktree .` (the rollback) before Step B moves to the next `(task_id, meta)`. Never leave a partial squash state across loop iterations — Step B's own next iteration would observe a dirty integration tree, fail the cleanliness assert, and either refuse the next merge or compound the unfinalized one.
+   The dry-run does NOT replace the abort-on-conflict guarantee — `CONFLICT_FILES` MUST be captured before any rollback. The squash dry-run leaves a bounded "clean merge staged but not yet committed" window; that window MUST be closed by either `git commit -F <message-file>` (the only intentional persistence path under T-4 — the message comes from the worker's final commit, T-3-processed at worker time, regex-checked at merge boundary) or `git restore --staged --worktree .` (the rollback) before Step B moves to the next `(task_id, meta)`. Never leave a partial squash state across loop iterations — Step B's own next iteration would observe a dirty integration tree, fail the cleanliness assert, and either refuse the next merge or compound the unfinalized one. The rebase strategy's window is bounded by the worker-worktree-local rebase + integration-checkout `git merge --ff-only` pair; the dogfood `merge` strategy's window is bounded by `git merge --no-ff` itself (atomic — no separate commit step). All three strategies converge on the same exit_status taxonomy below.
 
 4. For **no-commit**: check whether this was a stuck-finding exit or a cycle-cap exit before marking blocked.
 
@@ -736,22 +1350,82 @@ For each `(task_id, meta)` in `RUNNING`:
 
    **For error:** append to `BLOCKED_IDS`. Stash BOARD-row update: `status: "blocked"`, `finished_at: "<now>"`, `exit_status: "error"`, `notes: "see STATE_DIR/workers/<task_id>.log"`. The M7 recovery sub-classifier is NOT consulted for `error` outcomes — a non-zero shell exit means the worker crashed before it could call `chat_close`, so the closure ring buffer has no entry to examine and re-dispatch would almost certainly hit the same crash again.
 
-5. **M9 T-2 — worker-finish worktree cleanup** (BEFORE removing from `RUNNING`, so `meta.worktree_path` is still readable). The brief's invariant 1 forbids ccx-owned files alongside the user's repo, including the abandoned worker checkout. **Scope of this step — normal Step B terminal outcomes ONLY.** Reaches here when Step B step 2/3/4 classified the task as: `merged` (clean squash + commit), `merge-conflict`, `merge-aborted`, `merge-commit-failed` (step 3 outcomes), generic `no-commit` (step 4 with NO §P2.5 sub-classifier handoff), or `error` (step 4 non-zero shell exit). For every one of those exits, remove the worker's worktree:
+5. **M9 T-2 + T-4 — worker-finish worktree cleanup, branch deletion gated on the merged exit** (BEFORE removing from `RUNNING`, so `meta.worktree_path` is still readable). The brief's invariant 1 forbids ccx-owned files alongside the user's repo (T-2 — worktree removal), and invariant 5 forbids surviving `ccx/T-X` branch refs after a worker FINISHES SUCCESSFULLY (T-4 — branch deletion on the merged exit only). **Scope of this step — normal Step B terminal outcomes ONLY.** Reaches here when Step B step 2/3/4 classified the task as: `merged` (clean merge + commit, any strategy), `merge-conflict`, `merge-aborted`, `merge-commit-failed`, `leak-detected-at-merge` (T-4, squash strategy regex regression), `rebase-conflict` (T-4, rebase strategy), generic `no-commit` (step 4 with NO §P2.5 sub-classifier handoff), or `error` (step 4 non-zero shell exit). The cleanup is path-specific per the exit_status; the union of every branch below provably covers every routed exit:
 
+   **Always (every reachable exit_status above EXCEPT `rebase-conflict`):** remove the worker's worktree.
    ```bash
    git worktree remove --force "<meta.worktree_path>" 2>/dev/null
    ```
+   Idempotent by construction: `--force ... 2>/dev/null` silently no-ops on a missing path, so transient FS oddities (a worktree directory already gone for unrelated reasons, a removal racing another process) never crash this step. NEVER reconstruct the path from a literal `<REPO_ROOT>-<task_id>`; the resolved path lives in `meta.worktree_path` and may be an opaque hash basename in paranoid mode. **The `rebase-conflict` exit is the sole exception** — its dedicated outcome description above commits the supervisor to preserving both the worktree AND the branch so the operator can `cd "<meta.worktree_path>"` and resolve the conflict in place against the pre-rebase tip; running `git worktree remove` here would destroy that surface and force the operator to `git worktree add` again from scratch. Detect the exit and skip the removal when `exit_status == "rebase-conflict"`.
 
-   Idempotent by construction for the normal Step B terminal outcomes this step serves: `--force ... 2>/dev/null` silently no-ops on a missing path, so transient FS oddities (a worktree directory already gone for unrelated reasons, a removal racing another process) never crash this step. NEVER reconstruct the path from a literal `<REPO_ROOT>-<task_id>`; the resolved path lives in `meta.worktree_path` and may be an opaque hash basename in paranoid mode.
+   **Paranoid `_index.json` cleanup** (only when `IS_PARANOID == true` AND the worktree-remove step above actually fired — skipped on `rebase-conflict` for the same reason): remove the entry for `task_id` and rewrite via the temp-and-rename idiom. Idempotent — if the entry is already gone, the rewrite is a no-op write of the same JSON.
 
-   **Paranoid `_index.json` cleanup** (only when `IS_PARANOID == true`): remove the entry for `task_id` and rewrite via the temp-and-rename idiom. Idempotent — if the entry is already gone, the rewrite is a no-op write of the same JSON.
+   **T-4 branch deletion — ONLY on the `merged` exit, with verification.** Per invariant 5 and the "Post-merge cleanup contract" clause of the merge-strategy resolver section above, a successful merge unconditionally deletes `ccx/<task_id>` AFTER the worktree-remove (the worktree-remove MUST land first because `git branch -D` refuses to delete a branch checked out in any worktree — including the supervisor's just-completed merge worktree under the squash and dogfood-merge strategies, and the worker's worktree under the rebase strategy). The deletion's stderr is captured (NOT discarded with `2>/dev/null`) so the supervisor can detect failures — branch protection enforcing delete restrictions, a hook rejecting the delete, a race with a peer process — and surface them rather than silently leaving `ccx/<task_id>` in place. Without this verification a failed delete would violate invariant 5 invisibly: pre-T-4 the P3 report always printed the manual `git branch -d` command so the operator could clean up; post-T-4 P3 no longer prints that command (deletion is supposed to be automatic), so an undetected delete failure would silently leak a `ccx/<task_id>` branch ref that T-6's verifier would only catch on the next merge attempt.
+   ```bash
+   BRANCH_DELETE_ERR="$(git branch -D "ccx/<task_id>" 2>&1 1>/dev/null)"
+   BRANCH_DELETE_RC=$?
+   if [ "$BRANCH_DELETE_RC" -ne 0 ] || git rev-parse --verify --quiet "refs/heads/ccx/<task_id>" >/dev/null; then
+     # Delete failed OR succeeded according to its exit code but the
+     # ref still resolves (e.g. a hook denied the change after `git
+     # branch -D` reported success — rare but observed under reflog
+     # protections). Both shapes are invariant 5 violations.
+     #
+     # The merge commit is already on the integration branch — this
+     # is the post-merge step, not the pre-merge gate — so the task's
+     # exit_status stays `approved` and MERGED_IDS already includes
+     # <task_id>. What we need to do is (a) record the cleanup
+     # failure on the merged row's `notes` field so the P3 report
+     # surfaces it inline with the merge result, and (b) keep a
+     # synchronous recovery breadcrumb the operator can act on.
+     #
+     # Append to (or create) STATE_DIR/supervisor-branch-residue-<SUPERVISOR_RUN_ID>.txt
+     # — a DEDICATED sidecar distinct from the merge-commit-failed
+     # recovery file. Step D's merge-commit-failed cleanup deletes
+     # `supervisor-recovery-<SUPERVISOR_RUN_ID>.txt` on a Step D
+     # success ("the sidecar is obsolete (the Step D commit subject
+     # already records every blocked id...)"), which would delete a
+     # branch-delete breadcrumb sharing that filename even though the
+     # branch is still leaking. Using a separate per-run filename
+     # keeps the two recovery surfaces independent: Step D never
+     # touches `supervisor-branch-residue-*.txt`, so the breadcrumb
+     # survives every Step D outcome until the operator manually
+     # cleans it up after running `git branch -D` themselves. Format:
+     #
+     #   Run: <SUPERVISOR_RUN_ID>
+     #   Cause: branch-delete-after-merge-failed for <task_id> on integration branch <INTEGRATION>
+     #   Merged commit: <git rev-parse HEAD short SHA — the squash/ff/no-ff commit just created>
+     #   Last git stderr: <verbatim BRANCH_DELETE_ERR, single-line>
+     #
+     #   Required manual recovery:
+     #   1. Inspect the branch protection or hook that rejected `git branch -D ccx/<task_id>`.
+     #   2. Once resolved, run: git branch -D ccx/<task_id>
+     #   3. Delete this file once every listed branch is gone: rm STATE_DIR/supervisor-branch-residue-<SUPERVISOR_RUN_ID>.txt
+     #
+     # Mutate the merged row's stashed notes (in-memory before Step D
+     # persists) to include: `branch-delete-after-merge failed: <first
+     # 200 chars of BRANCH_DELETE_ERR, single-line> — see
+     # STATE_DIR/supervisor-branch-residue-<SUPERVISOR_RUN_ID>.txt`.
+     # The row's status / exit_status do NOT change (the merge
+     # succeeded); only `notes` records the cleanup residue. The
+     # sidecar path here is DISTINCT from the merge-commit-failed
+     # sidecar (`supervisor-recovery-*.txt`) precisely so a Step D
+     # success that cleans up the latter does not collaterally delete
+     # the former.
+     #
+     # P3's Merged section detects rows whose notes carry the
+     # `branch-delete-after-merge failed:` prefix and prints the
+     # sidecar path + the manual recovery command for each. Do NOT
+     # set STOP_DISPATCHING — a single failed branch delete is not
+     # a per-supervisor failure; the merge itself succeeded.
+     :
+   fi
+   ```
+   **Every other reachable exit_status preserves the branch** — `merge-conflict` and `merge-aborted` need the branch for human conflict resolution; `merge-commit-failed` is paired with the recovery sidecar that explicitly states "Worker branch `ccx/<task_id>` is INTACT and contains the approved diff"; `leak-detected-at-merge` preserves the branch so the operator can `git checkout ccx/<task_id>` and inspect the worker's commit message that tripped the merge-boundary regex; `rebase-conflict` preserves both branch and worktree so the conflict can be resolved on the worker branch directly; generic `no-commit` and `error` leave the branch for log/commit triage. The blocked-exit branch preservation is the existing T-2 contract; T-4 only ADDS the deletion (with verification + sidecar fallback) on the merged exit, never removes the preservation on blocked exits.
 
-   **Branch deletion is NOT done here.** T-2 only removes the worktree; the branch `ccx/<task_id>` is left intact so the operator can `git checkout ccx/<task_id>` to inspect a merged history or recover a blocked attempt's diff. T-4 will own `git branch -d ccx/<task_id>` on the same trigger and bring the per-task cleanup contract to completion; until T-4 lands, the existing P3 report prints the manual branch-cleanup command.
-
-   **§P2.5 paths bypass this step.** Every §P2.5 terminal/abort/retry-spawn-failure branch removes `<task_id>` from `RUNNING` inline AFTER performing its own equivalent worktree + paranoid `_index.json` cleanup, then returns directly to the outer Step B drain loop without falling through to step 5. The two cleanup sites — this step 5 and the §P2.5 inline cleanups — are mutually exclusive per task per exit (not overlapping): a given terminal exit lands at exactly ONE site based on which Step B classifier branch routed it. Successful re-dispatches (§P2.5 step 9) leave `task_id` in `RUNNING` with a fresh worktree and reach neither site; Step B's next iteration eventually classifies the retry and routes through the applicable cleanup site then.
+   **§P2.5 paths bypass this step.** Every §P2.5 terminal/abort/retry-spawn-failure branch removes `<task_id>` from `RUNNING` inline AFTER performing its own equivalent worktree + paranoid `_index.json` cleanup, then returns directly to the outer Step B drain loop without falling through to step 5. The two cleanup sites — this step 5 and the §P2.5 inline cleanups — are mutually exclusive per task per exit (not overlapping): a given terminal exit lands at exactly ONE site based on which Step B classifier branch routed it. §P2.5's existing inline cleanup sites already issue `git branch -D ccx/<task_id>` because the recovery path needs a clean slate for the next dispatch — that branch-delete is independent of T-4's merged-exit contract and is unchanged by T-4 (the recovery paths are not "successful merges"; they delete the branch because re-dispatch requires it, not because of invariant 5). Successful re-dispatches (§P2.5 step 9) leave `task_id` in `RUNNING` with a fresh worktree and reach neither site; Step B's next iteration eventually classifies the retry and routes through the applicable cleanup site then.
 
 6. Remove `task_id` from `RUNNING`. Also `delete LAST_OUTPUT_SEEN[meta.shell_id]` so the Step C probe map cannot grow unbounded across a long-running supervisor session (pre-M6 §15.2).
-7. Print a one-line completion notice summarizing outcome + duration + log path. Pre-M6 §15.3 — if the task just transitioned to `merged` fire the merge lifecycle `chat_send`; if it transitioned to `blocked` (any `exit_status` including `attempts-exhausted`, `stuck-aborted`, `stuck-recovery-failed`, `stuck-cleanup-failed`, `merge-conflict`, `merge-aborted`, `merge-commit-failed`, `no-commit`, `error`, `stale-artifact`, `spawn-error`) fire the block lifecycle `chat_send`. Both gated on `CHAT_SESSION_ID && !CHAT_DEGRADED` per the table in P0.5. Never emit both for the same task-completion event.
+7. Print a one-line completion notice summarizing outcome + duration + log path. Pre-M6 §15.3 — if the task just transitioned to `merged` fire the merge lifecycle `chat_send`; if it transitioned to `blocked` (any `exit_status` including `attempts-exhausted`, `stuck-aborted`, `stuck-recovery-failed`, `stuck-cleanup-failed`, `merge-conflict`, `merge-aborted`, `merge-commit-failed`, `leak-detected-at-merge`, `rebase-conflict`, `no-commit`, `error`, `stale-artifact`, `spawn-error`) fire the block lifecycle `chat_send`. Both gated on `CHAT_SESSION_ID && !CHAT_DEGRADED` per the table in P0.5. Never emit both for the same task-completion event.
 
 ### Step B2 — Answer supervisor asks
 
@@ -789,7 +1463,7 @@ Before the first iteration of the scheduling loop runs Step B2, initialize two i
 
       1. **Brief `## Decisions` table** — `Read` `STATE_DIR/tasks/<TASK_ID>.md` (the committed supervisor-owned copy at `REPO_ROOT`, NOT the worktree copy — the worktree copy could have been edited by the worker even though the dispatch prompt forbids it; reading the integration-branch copy keeps supervisor decisions traceable to dispatch-time content). Parse the `## Decisions` section as a YAML-ish list of `- q: "…"` / `  a: "…"` pairs. Match the ask's `prompt` against each `q` semantically — paraphrase is fine, topic drift is not.
       2. **BOARD `## Direction`** — `DIRECTION_TEXT` captured in P1. Match for project-wide policy statements that directly answer the ask (e.g. "prefer stdlib over third-party deps" answers "can I add lodash?").
-      3. **Integration-branch worker-commit history** — `git log "<INTEGRATION>" -n 40 --format='%H%x09%s%x09%b'`. Scan each commit's subject + body for lexical hits on the ask's prompt. Pre-M6 §15.1 switched Step B to `git merge --squash`, so integration history now contains one supervisor-authored commit per task (subject `T-<id>: <title>`) whose body preserves every squashed worker commit's full message (subject + body, in chronological order — see Step B step 3's `WORKER_LOG` interpolation). `--no-merges` is no longer needed (squash produces no merge commits at all) and the worker rationale that Tier 3 needs to cite is present in the squash commit body. Cite the squash commit SHA (first 8 chars) in the reply; the body line that hit can be quoted verbatim. Older history written before §15.1 may still contain `--no-ff` merge commits (empty body, `Merge branch 'ccx/T-<id>'` subject); those are harmless to scan because they will never lexically match a specific ask.
+      3. **Integration-branch worker-commit history** — `git log "<INTEGRATION>" -n 40 --format='%H%x09%s%x09%b'`. Scan each commit's subject + body for lexical hits on the ask's prompt. Pre-M6 §15.1 switched Step B to `git merge --squash`. M9 T-4 further changed the squash commit's message: it now uses the worker's final commit message (subject + body, captured via `git log -1 --format=%B "ccx/<task_id>"`) **without** the pre-T-4 supervisor-authored `T-<id>: <title>` subject or the chronological worker-log body, so the squash commit contains exactly the worker's tip-commit message and nothing else. **Tier 3 contract under T-4:** the integration history exposes one commit per task with the worker's tip-commit text (subject + body); a multi-commit worker branch's earlier per-cycle rationale is NOT visible to Tier 3 because the supervisor no longer concatenates it into the squash body. In practice worker branches almost always have exactly one commit (`/ccx:loop` Phase 4 commits once; M7 re-dispatches delete the branch via §P2.5 step 5 before re-spawning, so each attempt produces a single commit), so the practical loss is small; rare multi-commit branches yield a Tier-3 view limited to the tip. When Tier 3 cannot match the ask, escalate per §P2.3's conservative bias — earlier rationale lives on disk in `STATE_DIR/workers/<task_id>.log` and the human can cite it on Discord. `--no-merges` is no longer needed (squash produces no merge commits at all). Cite the squash commit SHA (first 8 chars) in the reply; the body line that hit can be quoted verbatim. Older history written before T-4 may still contain pre-T-4 `T-<id>: <title>` squash commits with the chronological body — those remain searchable and contain the marker subject; lexical matches on those older commits are fine because the supervisor's reply cites the SHA + the matched line verbatim, not the marker subject itself. Pre-§15.1 `--no-ff` merge commits (empty body, `Merge branch 'ccx/T-<id>'` subject) are also harmless to scan because they never lexically match a specific ask.
 
    b. **Decide.**
       - **Confident match** (see §P2.3) → call `mcp__ccx-chat__chat_supervisor_reply` with `{askId, reply}`. The reply MUST begin with a one-line source citation — `"From brief Decisions: "`, `"From BOARD direction: "`, or `"From worker-commit <first 8 chars of SHA>: "` — so the worker can push back if the match was wrong.
@@ -1018,7 +1692,7 @@ A "confident match" is one where the supervisor is willing to answer a worker's 
 
 - **Tier 1 — Brief `## Decisions` entry (CONFIDENT).** Reply if the ask asks substantively the same question as a `- q:` entry in the brief's Decisions section. Paraphrase is fine ("which of X vs Y?" matches `q: "X vs Y?"`). Do NOT stretch across topics: an ask about library X does not match a decision about library Z just because both are "library choice" questions.
 - **Tier 2 — BOARD `## Direction` direct policy hit (CONFIDENT).** Reply if `DIRECTION_TEXT` contains a policy statement that concretely answers the ask. "Prefer stdlib over third-party deps" answers "can I add `lodash`?" with "no, use stdlib". Do NOT fabricate policy from vague direction — "focus on reliability" is not a concrete answer.
-- **Tier 3 — Prior task commits on the integration branch (LESS CONFIDENT).** Reply only if a recent commit's subject + body contains a decision that clearly governs the ask. Since pre-M6 §15.1 switched Step B to `git merge --squash`, integration commits from the supervisor take the shape `T-<id>: <title>` with the full chronological worker-commit log preserved in the body (Step B step 3's `WORKER_LOG`). Cite the commit SHA (first 8 chars) and quote the body line that hit. Older `--no-ff` merge commits from pre-§15.1 runs are empty-bodied and will never lexically match — they are harmless to scan. SKIP this tier when the ask is safety-sensitive (touching auth, data migrations, destructive operations, secret handling, network/filesystem permissions) — those always escalate.
+- **Tier 3 — Prior task commits on the integration branch (LESS CONFIDENT).** Reply only if a recent commit's subject + body contains a decision that clearly governs the ask. Under M9 T-4 the squash commit is the worker's final commit message verbatim (subject + body + trailers, captured via `git log -1 --format=%B "ccx/<task_id>"`) — no `T-<id>: <title>` prefix in customer mode (preserved in dogfood mode), no chronological `WORKER_LOG` body. The Tier 3 search therefore sees one commit per task with the worker's tip message; a multi-commit worker branch's earlier per-cycle rationale is NOT visible (uncommon — most worker branches have exactly one commit because `/ccx:loop` Phase 4 commits once and M7 re-dispatches delete + recreate the branch each attempt). Cite the commit SHA (first 8 chars) and quote the body line that hit. Older history written before T-4 may still contain `T-<id>: <title>` squash commits with the chronological body; those remain searchable. Pre-§15.1 `--no-ff` merge commits (empty body, `Merge branch 'ccx/T-<id>'` subject) are harmless to scan because they never lexically match a specific ask. When Tier 3 cannot match — including the multi-commit-branch case where earlier rationale lives only on disk in `STATE_DIR/workers/<task_id>.log` — escalate per the conservative bias. SKIP this tier entirely when the ask is safety-sensitive (touching auth, data migrations, destructive operations, secret handling, network/filesystem permissions) — those always escalate.
 - **Everything else → ESCALATE.** Ambiguous match, multiple conflicting sources, safety-sensitive, no source hit at all. Escalation is the default; autonomous answering is an optimization over always-escalating, not a replacement for human judgement.
 
 **Auto-escalate race.** The broker's auto-escalate timer is the hard deadline, but the broker applies a **per-ask clamp**: `SupervisorAdapter.enqueue()` in `plugins/ccx/mcp/ccx-chat/adapters/supervisor.mjs` sets the real delay to `min(AUTO_ESCALATE_AFTER_SEC, max(1, floor(timeoutSec) - 2))` when the worker supplied a finite positive `timeoutSec`, and `AUTO_ESCALATE_AFTER_SEC` otherwise. For each polled ask, compute the per-ask deadline the same way using the `timeoutSec` field returned by `chat_supervisor_poll`:
@@ -1300,10 +1974,12 @@ Then — also before the textual report — call `mcp__ccx-chat__chat_close({ses
 
 Then print a structured textual summary:
 
-- **Merged** (`<count>`): list `T-<id>` — `<title>` — `<duration>` — `attempts=<N>` — `final-tier=<alias>/<effort>` (suffixes only when `attempts > 1`; omit both when the task merged on its first attempt to keep the common case clean). `attempts > 1` means the task was re-dispatched after a stuck or cycle-cap exit and succeeded on a later attempt — worth surfacing so the human knows the M7 ladder escalation earned its keep, and `final-tier` tells them which rung ultimately did the work so they can calibrate `--start-tier` on future runs.
-- **Blocked** (`<count>`): list `T-<id>` — `<exit_status>` — log path (`STATE_DIR/workers/T-<id>.log`) — `attempts=<N>` — `final-tier=<alias>/<effort>` (the `attempts=` and `final-tier=` suffixes are only printed when `attempts > 1`; first-attempt blocks skip them). Blocked reasons: `stale-artifact | spawn-error | merge-conflict | merge-aborted | merge-commit-failed | no-commit | error | attempts-exhausted | stuck-aborted | stuck-recovery-failed | stuck-cleanup-failed | loop-flags-rejected`. M-specific reasons:
-  - `merge-aborted` (M4; algorithm updated to `git merge --squash` by pre-M6 §15.1): `git merge --squash` refused the merge with no unmerged paths (pre-merge-commit hook rejection, branch protection, unreachable object). The supervisor does NOT set `STOP_DISPATCHING` here — failures of this shape are usually per-merge, so the loop keeps draining and other peers can still merge.
-  - `merge-commit-failed` (M4): the pre-merge dry-run reported clean but `git commit --no-edit` rejected the merge (typically a pre-commit hook on the integration branch); the supervisor sets `STOP_DISPATCHING` so no new workers spawn, drains existing `RUNNING` peers via Step B, then exits via condition 3. A recovery sidecar at `STATE_DIR/supervisor-recovery-<SUPERVISOR_RUN_ID>.txt` is written when the same condition is likely to break the Step D batch BOARD commit.
+- **Merged** (`<count>`): list `T-<id>` — `<title>` — `<duration>` — `attempts=<N>` — `final-tier=<alias>/<effort>` (suffixes only when `attempts > 1`; omit both when the task merged on its first attempt to keep the common case clean). `attempts > 1` means the task was re-dispatched after a stuck or cycle-cap exit and succeeded on a later attempt — worth surfacing so the human knows the M7 ladder escalation earned its keep, and `final-tier` tells them which rung ultimately did the work so they can calibrate `--start-tier` on future runs. **T-4 cleanup-residue suffix:** when the row's `notes` carries the literal prefix `branch-delete-after-merge failed:` (Step B step 5 detected that the post-merge `git branch -D ccx/<task_id>` either errored or left the ref resolvable), append a separate line per merged-with-residue task: `    ! ccx/T-<id> still present — run 'git branch -D ccx/T-<id>' to clean up; see STATE_DIR/supervisor-branch-residue-<SUPERVISOR_RUN_ID>.txt for cause`. Print the absolute sidecar path once at the bottom of the Merged section (not per-row) so the operator can grep it for the verbatim git stderr that explains every residue. The branch-residue sidecar is DISTINCT from the merge-commit-failed recovery sidecar (`STATE_DIR/supervisor-recovery-<SUPERVISOR_RUN_ID>.txt`); Step D's success cleanup deletes the latter but never touches the former, so a branch-residue file survives across Step D outcomes until the operator manually `rm`s it after running the listed `git branch -D` commands.
+- **Blocked** (`<count>`): list `T-<id>` — `<exit_status>` — log path (`STATE_DIR/workers/T-<id>.log`) — `attempts=<N>` — `final-tier=<alias>/<effort>` (the `attempts=` and `final-tier=` suffixes are only printed when `attempts > 1`; first-attempt blocks skip them). Blocked reasons: `stale-artifact | spawn-error | merge-conflict | merge-aborted | merge-commit-failed | leak-detected-at-merge | rebase-conflict | no-commit | error | attempts-exhausted | stuck-aborted | stuck-recovery-failed | stuck-cleanup-failed | loop-flags-rejected`. M-specific reasons:
+  - `merge-aborted` (M4; T-4 generalised the algorithm to dispatch on `MERGE_STRATEGY` while preserving the original semantics): the merge primitive selected by `ccx.merge.strategy` (squash / rebase / dogfood-merge) refused the merge with no unmerged paths (pre-merge-commit hook rejection, branch protection, unreachable object) AND the in-iteration retry refused again. The supervisor does NOT set `STOP_DISPATCHING` here — failures of this shape are usually per-merge, so the loop keeps draining and other peers can still merge.
+  - `merge-commit-failed` (M4; squash strategy only — the rebase and dogfood-merge strategies do not have a separate commit step that can fail in this shape): the pre-merge dry-run reported clean but `git commit -F <message-file>` (T-4: the worker's final commit message replaces the pre-T-4 `T-<id>: <title>` subject) rejected the merge (typically a pre-commit hook on the integration branch); the supervisor sets `STOP_DISPATCHING` so no new workers spawn, drains existing `RUNNING` peers via Step B, then exits via condition 3. A recovery sidecar at `STATE_DIR/supervisor-recovery-<SUPERVISOR_RUN_ID>.txt` is written when the same condition is likely to break the Step D batch BOARD commit.
+  - `leak-detected-at-merge` (T-4, squash strategy in CUSTOMER MODE only): the worker's final commit message passed the T-3 marker-strip regex at worker time but regressed by the time the supervisor re-ran the same regex at the merge boundary. The rollback (`git restore --staged --worktree .`) fired inside the strategy dispatcher; no commit landed. The worker branch is preserved (Step B step 5 skips T-4's merged-only branch delete on blocked exits) so the operator can `git checkout ccx/<task_id>` and inspect the regressed message. **Recovery is operator-driven** — Step A's stale-artifact gate would reject a naive re-dispatch onto the preserved branch, so the operator picks ONE of: (a) **salvage** — `git commit --amend` on `ccx/<task_id>` to fix the subject, merge into the integration branch by hand (squash or rebase-then-ff), then mark this BOARD row `merged` manually (no supervisor re-dispatch involved); (b) **discard** — `git worktree remove <meta.worktree_path>; git branch -D ccx/<task_id>`, revise `STATE_DIR/tasks/T-<id>.md`'s `## Decisions` section to seed marker-strip guidance, then flip BOARD `status` from `blocked` to `pending` so the next supervisor run dispatches a fresh worker. The notes field carries both options verbatim so the operator sees them in `git log` / BOARD inspection. Auto-routing of this exit into §P2.5's stuck-flavored signal set is OUT of T-4's scope (deferred follow-up, same pattern as T-3's `commit-marker-leak`).
+  - `rebase-conflict` (T-4, rebase strategy only): `git rebase <INTEGRATION>` (run inside the worker's worktree via `git -C "<meta.worktree_path>"`) could not replay one or more worker commits without conflicts. `git rebase --abort` restored the worker branch AND the worktree's index to its pre-rebase tip; both the branch AND the worktree are preserved (Step B step 5 skips both the worktree-remove and the branch-delete on this blocked exit) so the operator can `cd "<meta.worktree_path>"` and recover in place. The notes field lists the likely-conflicting paths via `git diff --name-only <INTEGRATION>...ccx/<task_id>` (post-abort, since the unmerged index was already cleared). **Recovery is operator-driven** for the same reason as `leak-detected-at-merge` above — Step A's stale-artifact gate refuses to re-dispatch onto the preserved branch and worktree. Two options: (a) **resolve in place + merge by hand** — `cd <meta.worktree_path>; git rebase <INTEGRATION>; ` resolve conflicts as Git surfaces them; then merge into integration by hand (the supervisor will NOT pick this up because the stale-artifact gate would still trip); mark this BOARD row `merged` manually after the hand-merge; (b) **discard** — `git worktree remove --force <meta.worktree_path>; git branch -D ccx/<task_id>`, then flip BOARD `status` to `pending` so the next supervisor run dispatches a fresh worker. Auto-resolution is explicitly rejected by the brief's Decisions; an "adopt the preserved branch" path in Step A is a future improvement but out of T-4's scope.
   - `attempts-exhausted` (M7): the task consumed its full `--max-attempts` budget across some mix of `stuck` tier-bumps and `cycle-cap` same-tier retries without ever merging. No human prompt fires for this exit — `--max-attempts` is the hard cap by design. The notes field records the last signal, the final tier, and the remediation checklist (raise `--max-attempts`, raise `--worker-loops`, move `--start-tier` higher, or seed the brief's `## Decisions` section). All attempts' output is concatenated in `STATE_DIR/workers/T-<id>.log` per §P2.5's log-continuity rule.
   - `stuck-aborted` (M7 opus/max path): the worker hit stuck at the top of the ladder, the human was prompted, and they chose "Abort" (or supplied empty guidance, which the supervisor treats as abort). Only reachable at `opus/max` — below the top rung the supervisor auto-escalates the tier without prompting. Log path is the final word; the human already made the call.
   - `stuck-recovery-failed` (M7 opus/max path): after the human supplied guidance the supervisor tried to commit the revised brief but the commit failed (pre-commit hook, signing, branch protection on `STATE_DIR/tasks/`). The brief file is left modified on disk; P0's clean-tree check on the next run forces the human to resolve before a fresh dispatch.
@@ -1317,15 +1993,13 @@ Then print a structured textual summary:
 - **Still assigned/running** — only non-empty if the loop exited via `--max-tasks` while workers were still running. Step C waits on RUNNING, so this should stay empty; guard against it in the report anyway.
 - **Supervisor audit** (M3 + M7 decisions, when `STATE_DIR/supervisor-audit/<SUPERVISOR_RUN_ID>.jsonl` exists): parse every JSONL line in that file (no timestamp filter needed — the per-run filename already isolates this run's decisions from any concurrent supervisor) and summarize counts per `decision` and per `source`. M3 decisions use `decision: "reply" | "escalate"` with `source: "brief" | "direction" | "worker-history" | "none"`; M7 decisions use `decision: "tier-escalate" | "same-tier-retry" | "attempts-exhausted" | "spawn-error" | "stuck-recover" | "stuck-abort" | "stuck-recovery-failed" | "stuck-cleanup-failed"` with `source: "auto" | "human-ask" | "attempt-cap"`. Group the summary by decision family (M3 ask-handling vs M7 tier escalation / end-of-ladder recovery) so the human sees both dimensions at a glance; the `spawn-error` decision specifically flags re-dispatch launch failures (bad `--model`/`--effort` combo, config-file-induced crash, log-redirect failure) and should surface prominently in the summary when it fires, since it indicates a broken escalation the human needs to triage. Also print the in-memory `foreignAsksSkipped` counter — asks this run observed on the broker but did NOT own (another ccx session or not-yet-attributed); a non-zero value is informational, not a failure. Include the absolute path to `STATE_DIR/supervisor-audit/<SUPERVISOR_RUN_ID>.jsonl` so the human can grep it for deeper auditing. If no asks were handled AND no stuck/cap events fired this run (file absent AND no foreign skips), print `no supervisor decisions this run` and move on — absence is not an error. If the run was in Discord-only mode (no supervisor tool surface), note `M3 Step B2 and M7 sub-classifier disabled — broker not in supervisor mode; worker asks reached Discord via broker's auto-escalate and stuck/cap exits were classified as generic no-commit`.
 
-For each merged task, print the exact branch-cleanup command so the user can run it when ready:
+**M9 T-2 + T-4 — worktree AND branch cleanup are now automatic for the merged exit.** Pre-T-4 the supervisor printed `git branch -d "ccx/T-<id>"` for each merged task and left the deletion to the operator; T-4 folds that step into Step B step 5's worker-finish cleanup (gated on the `merged` exit, after the worktree-remove that T-2 already automated). So this report no longer prints a per-merged-task branch-delete command — the merged task's branch is already gone by the time P3 runs.
 
-```
-git branch -d "ccx/T-<id>"
-```
+For BLOCKED tasks the cleanup picture is exit-status-specific (see the Blocked section above for the per-status semantics). The branch is preserved on every blocked exit (operator triage); the worktree is preserved ONLY on `rebase-conflict` (so the operator can recover in place); every other blocked exit removes the worktree but keeps the branch. The `stuck-cleanup-failed` exit_status specifically signals that §P2.5 step 5's automatic removal provably failed and the task was removed from RUNNING via §P2.5 step 5's failure branch — so Step B step 5 is NOT reached for that path, and there is no second automatic retry. The human-facing manual cleanup command is included in that row's `notes` string; print the BOARD `notes` verbatim rather than synthesizing a new command line. For `rebase-conflict` AND `leak-detected-at-merge` the recovery is operator-driven and Step A's stale-artifact gate will NOT let a naive re-run pick up the preserved artifacts — the operator picks either the manual-merge-then-mark-merged path OR the cleanup-then-flip-to-pending path documented in each row's `notes` and in the Blocked section above. Print the BOARD `notes` verbatim for both so the operator sees both options inline.
 
-**M9 T-2 — worktree cleanup is now automatic.** One of two cleanup sites fires on every worker terminal exit, partitioned by which Step B classifier branch routed the exit (per `docs/supervisor-design.md` §18.2.3): **Step B step 5** runs `git worktree remove --force` for the normal Step B terminal outcomes (merged, merge-conflict, merge-aborted, merge-commit-failed, generic no-commit, error), and **§P2.5 inline cleanup** runs the same removal for every recovery-path outcome (attempts-exhausted, both stuck-aborted branches, stuck-recovery-failed, pre-redispatch teardown, retry-spawn-failure). The two sites are mutually exclusive per task per exit — a given task lands at exactly one based on classification. So the user never has to issue `git worktree remove` themselves; the legacy `git worktree remove "<REPO_ROOT>-T-<id>"` line is no longer printed. The only manual command left is the branch delete above (T-4 will own automatic branch deletion in a later milestone, at which point this print disappears too). On the `stuck-cleanup-failed` exit_status specifically, §P2.5 step 5's removal attempt provably failed and the task was removed from RUNNING via §P2.5 step 5's failure branch — so Step B step 5 is NOT reached for that path, and there is no second automatic retry. The human-facing manual cleanup command is included in that row's `notes` string; print the BOARD `notes` verbatim rather than synthesizing a new command line.
+One of two cleanup sites fires on every worker terminal exit, partitioned by which Step B classifier branch routed the exit (per `docs/supervisor-design.md` §18.2.3 for the original T-2 site contract; T-4 added the merged-only branch-delete to the same site without changing the partition): **Step B step 5** runs the worktree-remove (every exit except `rebase-conflict`) and the T-4 branch-delete (merged exit only) for the normal Step B terminal outcomes, and **§P2.5 inline cleanup** runs site-specific cleanup for every recovery-path outcome. Within §P2.5 the branch-delete is NOT uniform — the re-dispatch-driven cleanups (step 2 `attempts-exhausted`, step 4 `stuck-recovery-failed` after a failed brief-revision commit in dogfood, step 5 pre-redispatch teardown including its `stuck-cleanup-failed` failure branch, step 6 retry-spawn-failure override) DO issue `git branch -D ccx/<task_id>` because re-dispatch requires a clean branch slate, while the terminal stuck-aborted branches in step 3(e) (the deliberate "Abort" choice AND the empty-other-text reinterpretation) deliberately PRESERVE `ccx/<task_id>` so the operator can `git checkout ccx/<task_id>` and inspect the discarded attempts. This is an existing §P2.5 contract (predates T-4); the branch-preservation on those two terminal stuck paths is independent of T-4's merged-only branch-delete rule. The two sites (Step B step 5 vs §P2.5 inline) are mutually exclusive per task per exit — a given task lands at exactly one based on classification.
 
-Supervisor does NOT run the branch-delete commands — the human decides when to clean up branches, matching `/ccx:loop`'s existing contract (§10). Worktree removal is the only ccx-managed cleanup in this release; T-4 brings branch removal into the same contract.
+Supervisor automatically cleans up worker branches on the merged exit only (T-4); blocked workers' branches are preserved for human triage. This brings worktree removal (T-2) and branch removal (T-4) into a single per-task cleanup contract that matches invariant 5's "no `ccx/T-X` branch ref remains after a worker finishes [successfully]".
 
 Print a final BOARD.md snapshot (the `## Tasks` YAML block) so the user can see the end state at a glance.
 
@@ -1342,18 +2016,20 @@ Print a final BOARD.md snapshot (the `## Tasks` YAML block) so the user can see 
 | Stuck-exit auto-revise brief and re-dispatch | M5 — shipped |
 | Model tier escalation across a 5-rung ladder | M7 — shipped |
 | Duet passthrough (brief `loop_flags` + preserve-on-overwrite + dispatch-prompt forwarding) | M8b — shipped |
+| Configurable merge strategy (`ccx.merge.strategy`) + post-merge branch deletion | M9 T-4 — shipped |
 | Per-task `model_profile` field in BOARD | M8 — open (see `docs/supervisor-design.md` §15.6) |
 | `--start-effort` override and dynamic ladder config | M8 — open (see §15.6) |
 | Supervisor resume after session close | open |
 
 Do not add the deferred rows above to this command — they are tracked separately in `docs/supervisor-design.md`. The current contract is: `BOARD.md` → briefs → dispatch (with scope-overlap gate, at the `--start-tier` rung) → poll completions → drain supervisor asks (autonomous reply or escalate) → pre-merge dry-run → on no-commit, peel stuck/cycle-cap from generic via the M7 sub-classifier and re-dispatch at the next rung (stuck) or same rung (cycle-cap) up to `--max-attempts`, asking the human only at `opus/max` stuck → BOARD update → audit report.
 
-### How M2 / M3 / M4 / M5 / M7 work together at runtime
+### How M2 / M3 / M4 / M5 / M7 / M9 T-4 work together at runtime
 
 - M2 ships the broker plumbing (`plugins/ccx/mcp/ccx-chat/adapters/supervisor.mjs`, `backend: "supervisor"` config option, and the `chat_supervisor_{poll,reply,escalate,close}` MCP tools). With `backend: "supervisor"` in `~/.claude/ccx-chat/config.json`, worker `chat_ask` calls queue in the broker and auto-escalate to Discord after `supervisor.autoEscalateAfterSec` seconds (default 60).
 - M3 ships the supervisor-side polling (`Step B2`) and the match-confidence rubric (`§P2.3`). When the broker is in Discord-only mode OR the broker tool is unavailable, Step B2 is a no-op and worker asks reach humans via the broker's own 60s auto-escalate timer, preserving the M1 behavior.
-- M4 adds two independent gates that share no state: the scope-overlap gate (`Step A2 step 1a` + `§P2.4`) defers candidate dispatches whose `scope.include` shares any tracked file with a `RUNNING` task's snapshotted `scope_include`, and the pre-merge dry-run (`Step B step 3`) wraps every approved-worker merge in a `git merge --squash` + `git commit -m "T-<id>: <title>"` pair (pre-M6 §15.1; originally `git merge --no-commit --no-ff` + `git commit --no-edit`) so conflict detection happens before commit creation. Neither gate touches the audit log or the broker; both are pure repo-state operations.
+- M4 adds two independent gates that share no state: the scope-overlap gate (`Step A2 step 1a` + `§P2.4`) defers candidate dispatches whose `scope.include` shares any tracked file with a `RUNNING` task's snapshotted `scope_include`, and the pre-merge dry-run (`Step B step 3`) wraps every approved-worker merge in a strategy-dispatched merge + commit pair (M9 T-4 generalised the pre-M6 §15.1 `git merge --squash` + `git commit -m "T-<id>: <title>"` shape into the `MERGE_STRATEGY` dispatcher described in the "Merge strategy resolver" section; the conflict-detection-before-commit-creation contract is preserved across every strategy). Neither gate touches the audit log or the broker; both are pure repo-state operations.
 - M5 originally added a closure-status ring buffer to the broker (`chat_supervisor_recent_closures`) plus a per-task stuck-recovery algorithm in the supervisor (`Step B step 4` stuck sub-classifier + `§P2.5`). M5's `STUCK_REDISPATCH_CAP = 2` and "always ask the human on the first stuck" behaviours are superseded by M7 (see below). The broker-side ring buffer and the `no-commit` peeling step survive unchanged; what changed is the supervisor-side decision tree on top of them.
 - M7 widens the M5 sub-classifier to also peel `budget-exhausted` (cycle-cap) exits, attaches a current-rung `tier` field to every `RUNNING` entry, and replaces the M5 human-prompt-on-first-stuck with automatic escalation: `stuck` bumps the tier one rung (or falls through to the M5 human-guidance `AskUserQuestion` path only at `opus/max`); `cycle-cap` retries the same rung; both increment `attempts`. The per-task budget moves from M5's hardcoded `STUCK_REDISPATCH_CAP = 2` to the new `--max-attempts` flag (default `4`); `--worker-loops` (default `3`) and `--start-tier` (default `sonnet`) round out the M7 surface. If the broker is Discord-only or `chat_supervisor_recent_closures` is unavailable, the M7 sub-classifier degrades silently to M4's no-commit-equals-blocked behaviour (`M7_DISABLED = true` run-level flag) — no tier bumps fire and stuck/cap workers are classified as generic no-commit.
 - M8b is a passthrough at the supervisor layer: brief frontmatter's optional `loop_flags: [...]` (allowlisted to `--duet` / `--codex-first`) feeds three points — Step A step 2's "write → stage → probe → commit-or-skip" brief regenerator (preserves the field across re-dispatches), §P2.2's dispatch-prompt builder (appends each entry verbatim after `--chat`), and Step A step 2c's allowlist validator (rejects unknown tokens with `exit_status: "loop-flags-rejected"`, classified `completed` by P0.5 step 7 rule 5). All duet decision logic — alternation rule, convergence counter, Codex/Claude reviewer primitives, the `M8B_STUCK_SIDE` log line — lives inside `/ccx:loop`'s Phase 2-Duet; the supervisor only ferries the flag from brief to worker. BOARD schema and `/ccx:plan` are unchanged.
+- M9 T-4 wires a configurable merge strategy into Step B step 3 via the new `ccx.merge.strategy` config key (default `squash`; `rebase` and the dogfood-gated `merge` round out the enum). The "Merge strategy resolver" section above is the SSOT for the resolver algorithm and the dogfood gate; P0 step 1a calls it once per run and caches `MERGE_STRATEGY`; Step B step 3 dispatches on that single cached value. T-4 also folds branch deletion into Step B step 5 on the merged exit only (per invariant 5 — `git branch -D ccx/<task_id>` after the existing T-2 worktree-remove, with the worktree-first ordering being load-bearing because `git branch -D` refuses to delete a branch checked out in any worktree). Two new blocked `exit_status` values surface T-4-specific failure modes: `leak-detected-at-merge` (squash strategy only — the worker's T-3-processed commit message regressed at the merge-boundary regex re-check; branch preserved for inspection) and `rebase-conflict` (rebase strategy only — `git rebase` could not replay worker commits cleanly; both branch AND worktree preserved so the operator can resolve in place). Neither new exit_status auto-routes into §P2.5's stuck-flavored signal set — deferred per the "Out of scope for T-4" list in the resolver section, mirroring T-3's `commit-marker-leak` deferral pattern.
 - The audit log (`STATE_DIR/supervisor-audit/<SUPERVISOR_RUN_ID>.jsonl`) is append-only JSONL, owned by the supervisor session, and committed by the supervisor's Step D batch commit alongside `BOARD.md`. M3 decisions (`decision: "reply" | "escalate"`) and M7 decisions (`decision: "tier-escalate" | "same-tier-retry" | "attempts-exhausted" | "spawn-error" | "stuck-recover" | "stuck-abort" | "stuck-recovery-failed" | "stuck-cleanup-failed"`) share the file and are distinguishable by decision family. **Add `STATE_DIR/supervisor-audit/<SUPERVISOR_RUN_ID>.jsonl` to the Step D staging set** so the run's decisions land on the integration branch atomically with the merge/block outcomes. Never truncate the file; never edit past lines.
