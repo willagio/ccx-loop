@@ -1283,9 +1283,76 @@ T-1 (this subsection's depth) establishes the resolver, the configuration surfac
 - **§18.2.6 (T-3 — commit hygiene):** shipped — see the dedicated subsection above. Customer-mode worker commits pass through a style-mirror LLM rewrite + marker-strip regex gate before `git commit` fires; three consecutive regex hits abort the worker with the new `commit-marker-leak` exit status. Opt-in `Ccx-Task: T-X` trailer when `ccx.commit.trailer = true`; dogfood mode (`ccx.dogfood = true`) bypasses both passes.
 - **§18.2.7 (T-4 — merge strategy + branch cleanup):** shipped — see the dedicated subsection above. Customer-mode merges default to `squash` with the worker's T-3-processed final commit message as the squashed subject (no `T-<id>:` prefix); `rebase` is the customer-mode opt-in for multi-commit history; the legacy `merge` (no-ff) strategy is gated behind `ccx.dogfood = true` and STOPs the run at config-load time otherwise. Post-merge cleanup unconditionally removes the worker's worktree (T-2) AND deletes its branch (T-4) on the merged exit; blocked exits preserve the branch per the T-2 triage contract. Two new blocked `exit_status` values surface T-4-specific failure modes: `leak-detected-at-merge` (squash strategy regex regression) and `rebase-conflict` (rebase strategy conflict).
 - **§18.2.8 (T-5 — inspection helpers + dogfood opt-in flag):** shipped — see the dedicated subsection above. Five new slash commands (`/ccx:where`, `/ccx:board`, `/ccx:tasks`, `/ccx:link`, `/ccx:unlink`) surface the otherwise-invisible `STATE_DIR` and manage the per-repo readable override (`ccx.link`). The `ccx.dogfood` flag's full behavior matrix across T-1..T-6 is collected in that subsection as SSOT. Customer mode reads gates from `git config ccx.*` only; the committed `.ccx-config` is dogfood-only documentation.
-- **§18.2.9 (T-6 — `ccx verify` + customer-mode README section):** the invariant table above operationalized as a script, plus the documentation hand-off to the README. T-6's filing.
+- **§18.2.9 (T-6 — `ccx verify` + customer-mode README section):** shipped — see the dedicated subsection below. `plugins/ccx/scripts/verify.sh` operationalizes the six-invariant table above as a Bash script with distinct exit codes 10..15 (lowest matching code on multi-violation; full violation list on stderr). The supervisor invokes the same script as a pre-merge gate in Step B step 3; a non-zero exit routes the task into §P2.5 with `signal = "leak"` for same-tier brief-revise + re-dispatch. `/ccx:verify` is the user-facing manual wrapper. `README.md` "Customer mode" section anchors the contract for human readers.
 
 Each subsequent M9 task amends THIS section (§18) rather than starting a new top-level section; the design doc keeps M9 as a single block so a reader can grasp the whole contract in one scroll.
+
+### 18.2.9 T-6 — `ccx verify` pre-merge gate + customer-mode README
+
+T-6 closes the M9 contract by mechanizing the six-invariant table from §18.1 as a Bash script (`plugins/ccx/scripts/verify.sh`) that the supervisor invokes as a pre-merge gate. The verifier exits 0 on a clean candidate and otherwise prints every violation to stderr while exiting with the LOWEST matching invariant code, so a single run surfaces the full leak picture rather than a one-at-a-time whack-a-mole.
+
+**Why a two-layer enforcement (T-3 write-time + T-6 merge-time).** LLM rewrites can regress. T-3's commit-hygiene retry budget is bounded at three attempts at worker time; once it burns and the worker commits, the supervisor's pre-merge gate is the last line of defense before the message lands on mainline. Without T-6, a worker that produces a marker-laden subject after exhausting T-3's budget would silently propagate the leak to integration. The two layers are not redundant — they enforce the same contract at different times: T-3 catches the common case cheaply (worker fixes its own output before commit); T-6 catches the rare regression and surfaces structured detail back to the worker's next attempt via M5 auto-revise.
+
+**Why a shell script (not Python / not a Node helper).** Six invariants × the entire set of supported customer repos × every supervisor run = a tight cold-start budget. Bash + `git` + `grep` + path existence is the natural shape for invariants 1, 2, 4, 5, 6. Invariant 3 — the commit-marker scan — additionally needs Python because the punctuation-bounded marker regex (`(?<![A-Za-z0-9])(T-[0-9]+:|…)`) and the trailer-block validation that gates the Ccx-Task carve-out both exceed what POSIX ERE + portable `grep` can do safely. The verifier fails closed (exit 2) if `python3` is absent rather than silently degrading invariant 3 — a degraded gate that misses punctuation-bounded markers (`fix (T-6)`, `update 'ccx/foo'`) defeats the whole pre-merge contract. The supervisor's P0 prereq check is the right place to surface this BEFORE dispatching workers; manual `/ccx:verify` callers see the same exit-2 message and can install python3.
+
+**Exit code surface (1:1 with the §18.1 invariant numbering):**
+
+| Code | Invariant | Detector |
+|---|---|---|
+| 0  | — (clean)         | every check below passed |
+| 10 | 1 (.ccx/ in tree) | `[ -d "$REPO/.ccx" ]` AND `ccx.dogfood != true` |
+| 11 | 2 (.gitignore)    | `grep -E '^\.ccx/?$\|^\.ccx/\*' "$REPO/.gitignore"` matches AND `ccx.dogfood != true` |
+| 12 | 3 (commit markers)| `git log --pretty='%s%n%b' "$BASE..$TARGET_REF" \| grep -v '^Ccx-Task:' \| grep -iE '(^\|[[:space:]])(T-[0-9]+:\|\[T-[0-9]+\]\|T-[0-9]+\|supervisor:[[:space:]]*(dispatch\|update board)?\|ccx/)'` matches AND `ccx.dogfood != true`. For squash strategy the supervisor also feeds the proposed final commit message via `CCX_PROPOSED_MSG` so a regressing subject is caught BEFORE the squash commit is created (belt-and-braces complement to T-4's existing merge-boundary regex). |
+| 13 | 4 (mainline merge)| `git log --merges --pretty='%s' "$BASE..$TARGET_REF" \| grep -E "Merge branch 'ccx/"` matches AND `ccx.dogfood != true`. Default squash strategy never produces merge commits, so this fires only under `ccx.merge.strategy = merge` — which the supervisor's config-load gate already STOPs in customer mode. The verifier is the second backstop. |
+| 14 | 5 (stale branches)| `git for-each-ref 'refs/heads/ccx/T-*'` returns non-empty after exempting `$TARGET_REF` (the worker branch the supervisor is about to merge is obviously still present at pre-merge time). Runs ALWAYS, even in dogfood — stale `ccx/T-*` branches are bad hygiene regardless of mode. |
+| 15 | 6 (protected paths)| `CCX_DIFF_PATHS` (newline-separated) matches `^(\.claude/\|CLAUDE\.md$\|AGENTS\.md$)` AND `CCX_PROTECTED_OPTIN != 1`. Independent of dogfood — even dogfood runs require explicit opt-in to edit `.claude/` / `CLAUDE.md` / `AGENTS.md`. |
+| 2  | verifier itself failed | not a git repo, `REPO` unset and cwd is non-git, etc. Operator-action exit; never returned from the supervisor's path because Step B step 3 has already established `REPO == $(pwd)` by then. |
+
+**Multi-violation contract.** When more than one invariant fires, the script exits with the LOWEST matching code AND prints every violation to stderr (one `ccx verify: …` line each). The lowest-code rule keeps telemetry stable (one primary classifier per run); the full-list stderr feeds M5's auto-revise step 4a so the worker sees every leak in its next attempt's Decisions section, not just the first one. A `leak-12 + leak-13 + leak-15` combination becomes `leak-12` in the BOARD `exit_status` field and a three-line block in the synthesized revise prompt.
+
+**Inputs (env vars, NOT argv).** Argv is reserved (the script takes no positional arguments); inputs are env vars so multi-line strings (`CCX_PROPOSED_MSG`, `CCX_DIFF_PATHS`) land without shell-quoting hazards:
+
+| Variable | Purpose |
+|---|---|
+| `REPO` | Repository root. Default: `git rev-parse --show-toplevel`. |
+| `BASE` | Integration baseline ref. Default: `HEAD`. The supervisor passes `<INTEGRATION>` here. |
+| `TARGET_REF` | Candidate worker ref. Default: `HEAD`. The supervisor passes `ccx/<task_id>`. Pass empty for "no worker in flight" (invariants 3/4/6 degrade to no-ops; invariant 5 flags every `ccx/T-*` ref). |
+| `CCX_DIFF_PATHS` | Newline-separated diff path list for invariant 6. Supervisor passes `git diff --name-only "$BASE...ccx/<task_id>"`; manual `/ccx:verify` falls back to the same computation. |
+| `CCX_PROPOSED_MSG` | Squash-strategy ONLY — the worker's final commit message that the squash will land verbatim. Scanned by invariant 3. Left empty for rebase / dogfood-merge (the per-commit subjects in the range are scanned directly). |
+| `CCX_PROTECTED_OPTIN` | When `=1`, invariant 6 is bypassed. Env-var-only (no `git config` knob) so a careless flip cannot silently disable invariant 6 across a machine. |
+
+**Supervisor wire-up (Step B step 3 of `plugins/ccx/commands/supervisor.md`).** The gate runs AFTER the pre-merge cleanliness assert (so a dirty integration tree blocks the verify call from running on stale state) and BEFORE the `case "$MERGE_STRATEGY"` dispatch (so a leak block fires identically across squash / rebase / dogfood-merge — T-4's own merge-boundary regex is squash-only; T-6 unifies). On non-zero exit:
+
+1. The strategy dispatch + commit/rollback block is skipped entirely. No `git merge` / `git rebase` / `git restore` has run yet — the integration tree is still in its pre-merge clean state, so there is NOTHING to roll back.
+2. The task routes into §P2.5 with `signal = "leak"`, `leak_detail = VERIFY_STDERR`, and `leak_code = VERIFY_RC` (10..15). §P2.5 step 1's new branch fires, step 4a synthesizes a Decisions entry from the leak detail, step 5 tears down the prior worktree+branch, and step 6 re-dispatches at the same tier.
+3. The leak path is budget-gated like cycle-cap and below-opus/max stuck (§P2.5 step 2): exhausted budget blocks with `exit_status: "attempts-exhausted"` and `LAST_SIGNAL_ON_BLOCK = "leak"`, which P0.5 step 7 rule 3 maps onto the stuck-flavored session close.
+4. Per-task only; do NOT set `STOP_DISPATCHING` — a leak regression on one worker does not invalidate others' merges.
+
+**Invariant → exit code → detector → revise hint template** (the §P2.5 step 4a Decisions entry is seeded from the verifier's stderr verbatim; the table here is the human-readable index of what each entry will look like):
+
+| # | Code | Detector | Revise hint shape (what step 4a tells the next attempt) |
+|---|---|---|---|
+| 1 | 10 | `[ -d "$REPO/.ccx" ]` | "Do NOT create a `.ccx/` directory in the working tree. Use `STATE_DIR` (resolved via `$CCX_DATA_HOME` / `$XDG_DATA_HOME` / platform default) for all task state." |
+| 2 | 11 | `.gitignore` matches `^\.ccx/?$\|^\.ccx/\*` | "Do NOT add a `.ccx` entry to `.gitignore`. The line is itself a ccx footprint; remove it per the README ccx-migrate section." |
+| 3 | 12 | commit message regex hit | "Rewrite the worker's commit subject/body to drop `T-N:`, `[T-N]`, standalone `T-N`, `supervisor:dispatch`, `supervisor:update board`, and `ccx/` markers. Use a natural commit message (e.g. `fix: …`, `add: …`). The opt-in `Ccx-Task: T-N` trailer is allowed only when `git config --local ccx.commit.trailer true`." |
+| 4 | 13 | `Merge branch 'ccx/...'` mainline | "Squash strategy never produces this. If your worker sees this code, `ccx.merge.strategy` was misconfigured — the supervisor's config-load gate should have STOPped earlier." |
+| 5 | 14 | stale `ccx/T-*` branch | "Branch ref hygiene is the supervisor's job, not the worker's. If a re-dispatch trips this, the supervisor will surface a manual cleanup hint." |
+| 6 | 15 | diff touches protected path | "Do NOT edit `.claude/`, `CLAUDE.md`, `.claude/settings.json`, or `AGENTS.md`. If your task legitimately requires it, the brief's `scope.include` should list those paths explicitly AND the pre-merge gate should be invoked with `CCX_PROTECTED_OPTIN=1`." |
+
+**Manual entry point (`/ccx:verify`).** Thin slash-command wrapper around the same script (`plugins/ccx/commands/verify.md`). Use cases:
+
+- Post-run audits — "did the supervisor leave any leaks behind?"
+- Brief-rewrite sanity checks — "would my proposed message pass the gate?" (pass `CCX_PROPOSED_MSG`).
+- Diagnosing a `leak-<code>` exit_status the supervisor surfaced — run with the same `BASE`/`TARGET_REF` and inspect the full violation list locally.
+
+The wrapper accepts `--base REF`, `--target REF`, `--with-diff PATH`, and forwards everything as env vars. `CCX_PROTECTED_OPTIN=1` and `CCX_DATA_HOME=…` etc. pass through from the operator's shell. There is no separate "manual verify mode" — the supervisor and the slash command call the same script with the same contract.
+
+**Out of scope for T-6.** Deferred to a later milestone:
+
+- **Auto-running `ccx verify` as a Git pre-merge / pre-commit hook in user repos.** Would write to `.git/hooks/`, which invariant 6 would flag if the hook script itself contained `ccx/` paths. Supervisor invocation only; manual `/ccx:verify` for ad-hoc audits.
+- **Recovering automatically from invariant 14 (stale branch).** The verifier flags stale `ccx/T-*` refs but does NOT delete them — destructive ref operations on a customer's repo without explicit consent are out of policy. The revise hint surfaces the manual `git branch -D` command instead.
+- **A `--paranoid` verifier mode that elevates warnings to errors.** `git config ccx.paranoid` already governs that for the T-5 inspection helpers and the T-2 worktree key shape; the verifier itself has no "warning" tier (every fired invariant is a hard error already), so the knob has no effect here.
+- **JSON output mode.** A `--format json` flag would make the verifier scriptable for higher-level dashboards. Deferred until a concrete consumer surfaces — `/ccx:supervisor` itself just needs the exit code + stderr, both of which are stable contracts.
 
 ### 18.9 Out of scope for M9
 
