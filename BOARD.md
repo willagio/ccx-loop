@@ -239,12 +239,15 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/loop.md
       - docs/supervisor-design.md
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on:
     - T-3
   brief: .ccx/tasks/T-4.md
-  attempts: 0
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-4"
+  branch: "ccx/T-4"
+  started_at: "2026-05-24T16:24:18Z"
   notes: |
     Replace the current supervisor merge logic (which produces
     `Merge branch 'ccx/T-X'` commits) with a configurable strategy
