@@ -68,7 +68,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/plan.md
       - docs/supervisor-design.md
     exclude: []
-  status: queued
+  status: pending
   priority: normal
   depends_on: []
   brief: .ccx/tasks/T-1.md
@@ -122,7 +122,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/supervisor.md
       - docs/supervisor-design.md
     exclude: []
-  status: queued
+  status: pending
   priority: normal
   depends_on:
     - T-1
@@ -173,7 +173,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/forever.md
       - docs/supervisor-design.md
     exclude: []
-  status: queued
+  status: pending
   priority: normal
   depends_on:
     - T-1
@@ -230,7 +230,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/loop.md
       - docs/supervisor-design.md
     exclude: []
-  status: queued
+  status: pending
   priority: normal
   depends_on:
     - T-3
@@ -292,7 +292,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - .ccx-config
       - docs/supervisor-design.md
     exclude: []
-  status: queued
+  status: pending
   priority: normal
   depends_on:
     - T-1
@@ -347,7 +347,7 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - README.md
       - docs/supervisor-design.md
     exclude: []
-  status: queued
+  status: pending
   priority: normal
   depends_on:
     - T-1
