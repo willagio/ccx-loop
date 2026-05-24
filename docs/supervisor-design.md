@@ -384,7 +384,7 @@ while pending_tasks_exist() or running:
 
 - **Integration branch** defaults to `main` but `--integration=<branch>` can redirect. Supervisor never force-pushes.
 - **Merge mechanism**: `git merge --squash` (pre-M6 §19.1; replaces an earlier `--no-ff` design). Each task lands as exactly one supervisor-authored commit on the integration branch with subject `T-<id>: <title>`. Rationale: `/ccx:loop` Phase 4 already squashes its review-fix cycles into a single commit, so a `--no-ff` merge would only add a tree-empty graph node — pure noise. Squash gives the same audit surface (one commit per task, identifiable by its `T-<id>:` subject) without the extra commit. Conflict detection still happens before commit creation: the supervisor stages the squash, inspects `git ls-files -u`, and either commits (clean) or rolls back via `git restore --staged --worktree .` (conflict). The rollback is guarded by a pre-merge `git status --porcelain` cleanliness assert so the wholesale restore can never destroy unrelated uncommitted changes.
-- **Worktree cleanup** is deferred to the human. Supervisor reports the `git worktree remove` commands after merge, following `/ccx:loop`'s existing contract (which also leaves worktrees).
+- **Worktree cleanup** is automatic under M9 T-2 (§18.2.3). On every worker terminal exit — merged, blocked of any flavour, or §P2.5 stuck-aborted — Step B step 5 (or the inline cleanup in the §P2.5 abort branches and retry-spawn-failure override) runs `git worktree remove --force` on the resolved `meta.worktree_path`. Worker-finish cleanup also prunes the paranoid-mode `<STATE_DIR>/worktrees/_index.json` entry. **Branch cleanup remains manual** until T-4 lands: the P3 report still prints `git branch -d ccx/T-<id>` for each merged task so the operator can issue branch deletes when ready. Pre-T-2 dogfood operators who relied on the old "supervisor reports cleanup commands and the human runs them" workflow still see the branch-delete print; the worktree-remove print disappeared (Step B step 5 already ran the command).
 - **Post-merge `BOARD.md` update** is a single commit per batch of merges, not per individual merge, to avoid N+1 commits cluttering history. Commit subject: `supervisor: update board — merged T-12, T-15, T-19, blocked T-9`.
 
 ---
@@ -651,7 +651,7 @@ The `shell_id` field stays in `RUNNING` records because Step C's adaptive pollin
 
 2. **Step A step 3a — supervisor pre-creates the worker worktree from the post-brief-commit HEAD.** Worktree creation moved out of `/ccx:loop --worktree` (worker-side) into the supervisor itself. The supervisor commits the brief on `INTEGRATION` (Step A step 3) and then forks the worker worktree from `git rev-parse HEAD` — which is the same commit Step B will eventually squash-merge INTO. Forking from `origin/<INTEGRATION>` directly would be a mistake: when local `INTEGRATION` has diverged from origin (the second/third/etc. dispatch of a run includes prior task merges on local), the `git log "<INTEGRATION>..ccx/<TASK.id>"` diff in Step B step 2 would include upstream-only commits as if they were worker work, and Step B step 3's squash would replay them into the `T-<id>: <title>` commit — silently inflating audit history and risking false conflicts. Forking from local `HEAD` (post-brief) keeps Step B's diff window exactly what it has always been: "what changed on the worker branch after fork."
 
-The supervisor's `cd "<REPO_ROOT>-<TASK.id>" && claude -p ...` spawn ensures the OS process cwd matches `meta.worktree_path` — that is the join key §16.1's M8a liveness check reads, and it only works because the supervisor owns the worktree path. Stripping `--worktree=<TASK.id>` from `DISPATCH_PROMPT` is the matching worker-side change: `/ccx:loop` without `--worktree` runs in cwd, which IS the worktree.
+The supervisor's `cd "<worktree_path>" && claude -p ...` spawn ensures the OS process cwd matches `meta.worktree_path` — that is the join key §16.1's M8a liveness check reads, and it only works because the supervisor owns the worktree path. The `<worktree_path>` substitution is whatever the M9 T-2 worktree-path resolver returned for this task (§18.2.1: `<STATE_DIR>/worktrees/<task_key>/` in customer mode, legacy `<REPO_ROOT>-<TASK.id>` sibling in dogfood mode); the M8a contract holds regardless of which branch fired because the cwd is whatever the supervisor `cd`'d into immediately before the `claude -p` exec. Stripping `--worktree=<TASK.id>` from `DISPATCH_PROMPT` is the matching worker-side change: `/ccx:loop` without `--worktree` runs in cwd, which IS the worktree.
 
 Failure cases each have a documented fallback (none are fatal):
 
@@ -1002,15 +1002,95 @@ Dogfood repos (this one) — no migration needed; `git config ccx.dogfood true` 
 
 Customer repos with no prior ccx history — no migration needed; the resolver creates the state directory on first access. Customer repos with a stray `.ccx/` directory from pre-M9 experimentation should `git rm -r .ccx/` and commit before running M9 commands; otherwise T-6's verifier blocks the next merge.
 
+### 18.2.1 T-2 — Worktree relocation
+
+Status: proposed (2026-05-24). Touches: `plugins/ccx/commands/supervisor.md` (the "Worktree path resolver" section, P0 step 1a's `IS_PARANOID` resolution, Step A steps 1b/3a/4/5/6/7, Step B step 5's worker-finish cleanup, §P2.5 steps 2/3(e)/4/5/6/7, and the P3 cleanup-print).
+
+T-1 stopped a customer-mode `.ccx/` directory from appearing inside the user's worktree by relocating every state file to `<STATE_DIR>`. T-2 closes the corresponding leak ONE directory level up: pre-T-2 every worker checkout lived at `<REPO_ROOT>-<task_id>` as a sibling of the user's repo, visible in any parent-directory listing and named with the ccx-internal task id (`my-project-T-1/`, `my-project-T-2/`, …). T-2 moves that worktree into `<STATE_DIR>/worktrees/<task_key>/` in customer mode so the user's repo parent stays free of `*-T-<id>` siblings. Dogfood mode is unchanged (the legacy sibling path is the documented dogfood workflow).
+
+**Worktree path resolver — algorithm** (mirrors §18.2's STATE_DIR resolver; per-task; first match wins; evaluate top-to-bottom):
+
+| Mode | `<task_key>` | `<worktree_path>` |
+|---|---|---|
+| Dogfood (`IS_DOGFOOD == true`) | `<task_id>` | `<REPO_ROOT>-<task_id>` (legacy sibling) |
+| Customer non-paranoid (`IS_DOGFOOD == false` AND `IS_PARANOID == false`) | `<task_id>` | `<STATE_DIR>/worktrees/<task_id>` |
+| Customer paranoid (`IS_DOGFOOD == false` AND `IS_PARANOID == true`) | `sha256(<task_id> + ":" + <ISO-8601 UTC ts of this resolution>)[:8]` (lowercase hex) | `<STATE_DIR>/worktrees/<task_key>` |
+
+`IS_PARANOID` is the cached result of `git config --get --type=bool ccx.paranoid`, resolved once at P0 step 1a alongside `IS_DOGFOOD`. Dogfood + paranoid is treated as dogfood: the resolver short-circuits to the legacy sibling path before consulting `IS_PARANOID`, because forcing an opaque hash onto a sibling-of-repo directory would defeat the legibility goal that motivates dogfood mode.
+
+**`.git/worktrees/<task_key>/` metadata directory.** `git worktree add <path>` derives the metadata directory name in `.git/worktrees/` from `basename(<path>)`. Every resolver branch produces a `<worktree_path>` whose basename is exactly `<task_key>`, so the metadata directory automatically inherits the opacity (paranoid mode) or readability (default mode) of the chosen key. No `--name` flag exists on `git worktree add` and none is needed.
+
+**Per-task caching.** The resolver is invoked exactly once per task per dispatch lifecycle: at **Step A step 1b for the first dispatch** (the pair is stashed on a per-pass scratchpad `TASK._resolved_worktree`, consumed by Step A step 3a and step 7 without re-invocation), and at **§P2.5 step 6 for every re-dispatch** (after the prior worktree was torn down in §P2.5 step 5; the pair is stashed on `REDISPATCH_RESOLVED` and consumed by the re-invoked Step A step 3a / step 7). Step A step 7 propagates the cached pair into `RUNNING[<task_id>].worktree_path` and `RUNNING[<task_id>].task_key` so every subsequent reference (spawn `cd`, Step B step 1 cwd lookup, Step B step 5 cleanup, §P2.5 cleanups, P3 reporting) reads the persisted value. The 1b-not-3a ownership rule for first dispatch is load-bearing: in paranoid mode each resolver call mints a timestamp-seeded hash, so resolving at step 3a would have step 1b's stale-artifact gate test one path while `git worktree add` creates a different one.
+
+### 18.2.2 T-2 — Paranoid `_index.json` mapping
+
+When `IS_PARANOID == true`, the supervisor maintains `<STATE_DIR>/worktrees/_index.json` as the authoritative `<task_id> ↔ <task_key>` mapping for live workers. Schema:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {"task_id": "T-1", "task_key": "a3f9b2c0", "worktree_path": "<absolute>", "branch": "ccx/T-1", "created_at": "<ISO-8601 UTC>"},
+    {"task_id": "T-3", "task_key": "7d4e1f92", "worktree_path": "<absolute>", "branch": "ccx/T-3", "created_at": "<ISO-8601 UTC>"}
+  ]
+}
+```
+
+**Full rewrite, never append-only** (per the brief's Decisions section). The file holds one entry per live worker, worker count is bounded by `--parallel` (default 3, max 10), and a full rewrite of a small JSON file is atomic via the standard write-temp-and-rename idiom (`mv` is atomic within a single filesystem on POSIX, and `<STATE_DIR>/worktrees/` is always on the same filesystem as the temp file by construction). Append-only would require a reader to scan the whole file and resolve duplicates, defeating the simplicity goal.
+
+Write points (every write follows the temp-and-rename idiom):
+
+- **After successful `git worktree add`** in Step A step 3a (first dispatch) AND §P2.5 step 6 (re-dispatch): upsert the entry for `task_id`.
+- **After successful (or best-effort) worktree teardown** in:
+  - Step B step 5 (terminal-exit worker-finish cleanup: merged, no-commit blocked, error blocked, merge-conflict / merge-aborted / merge-commit-failed);
+  - Step A step 5 (first-dispatch spawn-failure cleanup);
+  - §P2.5 step 2 (attempts-exhausted budget block);
+  - §P2.5 step 3(e) — both stuck-aborted branches: the deliberate "Abort (mark blocked)" choice AND the empty-other-text reinterpretation (these return directly to the Step B drain loop and do NOT fall through to Step B step 5, so their `_index.json` prune is inline);
+  - §P2.5 step 4 (stuck-recovery-failed commit-failure-recovery cleanup);
+  - §P2.5 step 5 (pre-redispatch cleanup, plus the `stuck-cleanup-failed` failure branch when residue persists);
+  - §P2.5 step 6 (retry-spawn-failure override — the freshly-created retry worktree has its new `_index.json` entry pruned alongside the worktree + branch teardown, since the failed retry never reaches Step B step 5).
+
+  Each site removes the entry for `task_id` via the temp-and-rename idiom. Idempotent: if the entry is already gone or the file is missing, the rewrite of `{"version":1,"entries":[<...without this task>]}` is a no-op write.
+
+Read points: no live read paths in the supervisor itself. The file exists for operator introspection — `jq '.entries[] | select(.task_id == "T-3")' <STATE_DIR>/worktrees/_index.json` answers "where is T-3's worktree on disk?" without the operator needing to know the hash. The supervisor always uses `RUNNING[<task_id>].worktree_path` directly and never trusts the file's contents back into its own logic — even after a crash that leaves a stale entry, the next run rebuilds `RUNNING` from BOARD and reconciles via the stale-artifact gate.
+
+In customer non-paranoid mode `_index.json` is NOT written — the task-key equals the task id and the mapping is trivial. In dogfood mode the file is NOT written either — the sibling path is observable via `git worktree list`.
+
+### 18.2.3 T-2 — Worker-finish cleanup contract
+
+Pre-T-2 the supervisor printed `git worktree remove <REPO_ROOT>-T-<id>` in the P3 report and left it to the operator to run the command. That left a customer's repo parent directory cluttered with `*-T-<id>` siblings for as long as the operator failed to read and act on the report — visible to any other process listing the parent, and trivially backed-up by any tool that walks the parent (Time Machine, rsync to a backup mount). T-2 makes worktree removal **automatic on every worker terminal exit** so the leak window is bounded to the duration of one dispatch:
+
+Two cleanup sites enforce the contract, partitioned by the control-flow path the task takes through Step B. Together they cover every terminal exit_status:
+
+- **Step B step 5 (normal Step B terminal outcomes).** Step B's classifier in step 2/3/4 routes to: `merged` (clean squash + commit), `merge-conflict` / `merge-aborted` / `merge-commit-failed` (step 3 outcomes), generic `no-commit` (step 4 with no §P2.5 recovery), and `error` (non-zero shell exit). For each of these the task falls through to step 5 BEFORE being removed from `RUNNING`, where `git worktree remove --force "<meta.worktree_path>" 2>/dev/null` runs (paranoid mode also prunes the `_index.json` entry). The `--force ... 2>/dev/null` shape is idempotent — silently no-ops on a missing path, so the `stuck-cleanup-failed` retry case (where §P2.5 step 5's earlier attempt also touched this path) is safe.
+- **§P2.5 inline cleanup (recovery-path terminal outcomes and re-dispatch teardown).** When Step B step 4's sub-classifier routes a `no-commit` exit to §P2.5, the recovery algorithm performs its OWN cleanup at every site that removes the task from `RUNNING` without falling through to Step B step 5. Those sites are: §P2.5 step 2 (`attempts-exhausted`), step 3(e) (both stuck-aborted branches — deliberate "Abort" and empty-other-text reinterpretation), step 4 (`stuck-recovery-failed`), step 5 (pre-redispatch teardown, plus its `stuck-cleanup-failed` failure branch), and step 6's retry-spawn-failure override. Each site runs the same `git worktree remove --force` + paranoid `_index.json` prune pattern inline before clearing `RUNNING`. Successful re-dispatches (§P2.5 step 9) leave the task in `RUNNING` with a fresh worktree and do NOT reach either cleanup site — Step B's next iteration will eventually classify the retry and route through whichever cleanup path applies then.
+
+Step B step 5 specifically does NOT fire on the §P2.5 inline-cleanup branches because they return control directly to the outer Step B drain loop after their own cleanup, bypassing step 5. The two sites are mutually exclusive per task per exit, not overlapping — a given terminal exit lands at exactly one of them based on which classifier branch routed it.
+
+- **Branch deletion is left to T-4** (later milestone). T-2 only removes the worktree; the branch ref `ccx/<task_id>` is left intact so the operator can `git checkout ccx/<task_id>` post-merge to inspect the squashed history or recover a blocked attempt's diff. The P3 report continues to print the manual `git branch -d ccx/T-<id>` command for now (the manual `git worktree remove` line is removed).
+
+The cleanup contract is "any exit_status" per the brief — including `merge-commit-failed` and `stuck-cleanup-failed`. For `merge-commit-failed`, the recovery sidecar already records "Worker branch `ccx/<task_id>` is INTACT and contains the approved diff"; removing the worktree does NOT affect that statement (the branch ref lives independently). For `stuck-cleanup-failed`, an earlier §P2.5 step 5 attempt provably failed, and the human-facing notes string carries the manual-cleanup command; the Step B step 5 path is unreachable in this case (the task was already removed from `RUNNING` by §P2.5 step 5's failure branch).
+
+### 18.2.4 T-2 — Cross-filesystem note
+
+`git worktree add <path>` accepts paths on a different filesystem than the repo's `.git/` directory. Per the brief's Decisions section, no special handling is required: git's worktree machinery supports cross-FS locations natively. The `_index.json` write-temp-and-rename idiom relies on `mv` being atomic on a single filesystem; the temp file always lives alongside the destination (`<STATE_DIR>/worktrees/_index.json.tmp` → `<STATE_DIR>/worktrees/_index.json`), so the cross-FS question reduces to "what filesystem holds `<STATE_DIR>`" — a single user choice via `$CCX_DATA_HOME` or the XDG default, never split across multiple FS within one run.
+
+### 18.2.5 T-2 — Out of scope
+
+- **Forced relocation of in-flight workers' existing worktrees.** T-2 applies to NEW spawns only. A worker that was already running at the legacy sibling path when the supervisor binary is upgraded to T-2 finishes at that path; the per-task `RUNNING` entry caches the worktree path from dispatch time, so mid-run relocation is impossible by construction.
+- **Branch deletion on worker finish.** T-4 owns `git branch -d ccx/<task_id>` after worktree removal. T-2 leaves the branch ref intact.
+- **Migration of legacy sibling worktrees** from pre-T-2 customer-mode runs. The next supervisor run's Step A step 1b stale-artifact gate refuses to overwrite the legacy path; the operator runs `git worktree remove <REPO_ROOT>-<task_id>` once and the next dispatch lands at the new T-2 location. Auto-migration is rejected for the same reason T-1's BOARD migration is rejected — moving paths inside P0 would mutate operator state before the supervisor has even checked broker availability.
+- **Validation that `<STATE_DIR>/worktrees/` is writable, or that `<STATE_DIR>` and `REPO_ROOT` are on the same filesystem.** Both are user-environment concerns; an unwritable `<STATE_DIR>` surfaces as the existing Step A step 3a `git worktree add` failure (classified as `stale-artifact` with the git stderr in notes), which already covers the diagnostic path. Cross-FS is documented in §18.2.4 above; no pre-flight check is added.
+
 ### 18.8 Scope split across M9 tasks
 
-T-1 (this subsection's depth) establishes the resolver, the configuration surface, and the customer-mode write contract. The remaining M9 tasks each get a sibling subsection under §18 once they land:
+T-1 (this subsection's depth) establishes the resolver, the configuration surface, and the customer-mode write contract. T-2 (§18.2.1–§18.2.5 above) builds on it to relocate worker worktrees. The remaining M9 tasks each get a sibling subsection under §18 once they land:
 
-- **§18.2.1 (T-2 — worktree relocation):** worker worktrees in customer mode live alongside `<STATE_DIR>` rather than as `<REPO_ROOT>-<id>` siblings, so the user's repo tree stays free of `*-T-<id>` directories. Hooks into the resolver via a `STATE_DIR/worktrees/<id>/` subdirectory. T-2's filing.
-- **§18.2.2 (T-3 — commit hygiene):** removes `T-<id>:` / `supervisor:` commit subjects in customer mode, introduces the `Ccx-Task: T-X` trailer for opt-in provenance, and finalizes the `IS_DOGFOOD` gate on every supervisor-authored commit. T-3's filing.
-- **§18.2.3 (T-4 — merge strategy):** documents the `ccx.merge.strategy` config key, the squash-only default for customer mode, and the dogfood-gated `no-ff` escape. T-4's filing.
-- **§18.2.4 (T-5 — inspection helpers + dogfood opt-in flag):** documents `/ccx:where`, `/ccx:board`, `/ccx:tasks`, `ccx link` / `ccx unlink`, and the operator-facing surface around `ccx.dogfood`. T-5's filing.
-- **§18.2.5 (T-6 — `ccx verify` + customer-mode README section):** the invariant table above operationalized as a script, plus the documentation hand-off to the README. T-6's filing.
+- **§18.2.1–§18.2.5 (T-2 — worktree relocation):** shipped — see the dedicated subsections above. Customer-mode worker worktrees live at `<STATE_DIR>/worktrees/<task_key>/` (readable basename = `<task_id>` by default, opaque sha256 prefix in paranoid mode), with a `_index.json` mapping in paranoid mode and automatic worktree teardown on every worker terminal exit.
+- **§18.2.6 (T-3 — commit hygiene):** removes `T-<id>:` / `supervisor:` commit subjects in customer mode, introduces the `Ccx-Task: T-X` trailer for opt-in provenance, and finalizes the `IS_DOGFOOD` gate on every supervisor-authored commit. T-3's filing.
+- **§18.2.7 (T-4 — merge strategy + branch cleanup):** documents the `ccx.merge.strategy` config key, the squash-only default for customer mode, the dogfood-gated `no-ff` escape, and the automatic `git branch -d ccx/<task_id>` that follows T-2's worktree removal. T-4's filing.
+- **§18.2.8 (T-5 — inspection helpers + dogfood opt-in flag):** documents `/ccx:where`, `/ccx:board`, `/ccx:tasks`, `ccx link` / `ccx unlink`, and the operator-facing surface around `ccx.dogfood`. T-5's filing.
+- **§18.2.9 (T-6 — `ccx verify` + customer-mode README section):** the invariant table above operationalized as a script, plus the documentation hand-off to the README. T-6's filing.
 
 Each subsequent M9 task amends THIS section (§18) rather than starting a new top-level section; the design doc keeps M9 as a single block so a reader can grasp the whole contract in one scroll.
 
