@@ -68,11 +68,14 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/plan.md
       - docs/supervisor-design.md
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on: []
   brief: .ccx/tasks/T-1.md
-  attempts: 0
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-1"
+  branch: "ccx/T-1"
+  started_at: "2026-05-24T13:15:29Z"
   notes: |
     Foundation for M9. Every other M9 task assumes state lives at
     $XDG_DATA_HOME/ccx/<repo-key>/ (Linux/macOS) with $CCX_DATA_HOME
