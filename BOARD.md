@@ -179,12 +179,15 @@ This milestone is treated as a *contract*, not a feature set. The six invariants
       - plugins/ccx/commands/forever.md
       - docs/supervisor-design.md
     exclude: []
-  status: pending
+  status: assigned
   priority: normal
   depends_on:
     - T-1
   brief: .ccx/tasks/T-3.md
-  attempts: 0
+  attempts: 1
+  worktree: "/home/will/Repositories/ccx-loop-T-3"
+  branch: "ccx/T-3"
+  started_at: "2026-05-24T15:55:29Z"
   notes: |
     Independent of T-2 — this touches only the loop's commit step,
     not state location. Depends on T-1 because it consumes the shared
