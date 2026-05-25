@@ -192,157 +192,33 @@ Phase 4: Commit (gated — unresolved / test failure / cap-hit / stuck-exit bloc
 
 If Codex is not installed, implementation is preserved on disk and you're prompted to install it — no unreviewed commit.
 
-## Customer mode
+## Where ccx state lives
 
-ccx is invisible by default in any repo you point it at — the tool's state, briefs, worker logs, and audit history live OUTSIDE the user's working tree, and ccx-flavored commit subjects / merge commits / branch refs are blocked by a verifier before they can land on mainline. The contract is six invariants enforced mechanically:
+The supervisor's state (BOARD, briefs, worker logs, audit JSONL) lives outside your working tree at `~/.local/share/ccx/<repo-key>/` (Linux) or `~/Library/Application Support/ccx/<repo-key>/` (macOS), with `$XDG_DATA_HOME` honoured and `$CCX_DATA_HOME` as an explicit override. `<repo-key>` is `<basename>-<sha256-7>` of `git remote get-url origin` (falls back to a hash of `realpath(REPO_ROOT)` for never-pushed repos), so two clones of the same repo share state and two unrelated repos don't collide.
 
-1. The user's working tree contains no `.ccx/` directory or other ccx-owned files.
-2. The user's `.gitignore` (committed) contains no ccx-related entries.
-3. No commit subject or body on worker branches or new integration commits contains ccx tooling markers (`T-N:` prefix, `[T-N]`, standalone `T-N`, `supervisor:` subjects, `ccx/` branch markers). Single exception: opt-in Git trailer `Ccx-Task: T-N` when `git config --local ccx.commit.trailer true`.
-4. Mainline commits contain no merge commit subject `Merge branch 'ccx/...'`. Default merge strategy is squash; `merge` is gated behind `ccx.dogfood = true`.
-5. After a worker finishes, no `ccx/T-X` branch ref remains.
-6. The user's `.claude/`, `CLAUDE.md`, `.claude/settings.json`, `AGENTS.md` files are untouched unless explicitly opted in.
+Three inspection commands surface the path and contents:
 
-`/ccx:verify` runs the six checks against your repo on demand; the `/ccx:supervisor` invokes the same script automatically as a pre-merge gate so a worker that regresses past T-3's commit-hygiene retry budget is caught before its commit lands on integration.
-
-### Where ccx state lives
-
-Resolved by [`plugins/ccx/commands/supervisor.md`](plugins/ccx/commands/supervisor.md)'s "State path resolver" (full algorithm in [`docs/supervisor-design.md`](docs/supervisor-design.md) §18.2). First match wins:
-
-1. `$CCX_DATA_HOME` env var if set → that path verbatim (no `<repo-key>` suffix). Operator escape hatch for tests and shared state roots.
-2. `git config --local ccx.dogfood true` → `<REPO_ROOT>/.ccx/` (dogfood mode — used by this repo only; the ccx narrative IS the product).
-3. `$XDG_DATA_HOME/ccx/<repo-key>/` if `$XDG_DATA_HOME` is set.
-4. Platform default: `~/.local/share/ccx/<repo-key>/` (Linux) or `~/Library/Application Support/ccx/<repo-key>/` (macOS).
-
-`<repo-key>` is `<basename>-<sha256-7>` of `git remote get-url origin` (or the first remote, or a hash of `realpath(REPO_ROOT)` with a `-local-` infix for never-pushed repos). `/ccx:link --name <readable>` overrides the auto-derived key per-repo.
-
-### Inspecting state
-
-Five slash commands surface the otherwise-invisible state directory and the readable alias:
-
-- `/ccx:where` — prints the resolved `STATE_DIR` for the current repo.
+- `/ccx:where` — prints the resolved `STATE_DIR` (one line, no side effects).
 - `/ccx:board` — opens `STATE_DIR/BOARD.md` in `$EDITOR` (falls back to `cat`).
-- `/ccx:tasks` — lists task briefs under `STATE_DIR/tasks/`.
-- `/ccx:link --name <readable>` / `/ccx:unlink` — manage a per-repo readable override that replaces `<basename>-<sha256-7>`.
-- `/ccx:verify` — runs the six M9 invariant checks against the current repo. Exit 0 = clean; non-zero = leak (codes 10..15 map 1:1 to invariants 1..6).
+- `/ccx:tasks` — lists task briefs under `STATE_DIR/tasks/`, with `--status` filter.
 
-### Override env vars
+Worker worktrees go under `STATE_DIR/worktrees/T-X/` (also outside your tree). Approved worker branches merge via `git merge --squash` by default into a single mainline commit; the worker's commit message is rewritten to match your repo's recent-history style before the squash lands. Worker branches and worktrees are cleaned up after merge — no `ccx/T-X` ref survives.
 
-| Variable | Effect |
-|---|---|
-| `CCX_DATA_HOME` | Force `STATE_DIR` verbatim (no `<repo-key>` suffix). Use for test isolation. |
-| `XDG_DATA_HOME` | Standard XDG redirection — picks the base directory for the customer-mode `<repo-key>` subtree. |
-| `CCX_PROTECTED_OPTIN` | When `=1`, lets `ccx verify` accept a diff that touches `.claude/`, `CLAUDE.md`, or `AGENTS.md`. Per-invocation only — there is no persistent `git config` knob, so the opt-in cannot silently disable invariant 6 across an operator's machine. |
+### Migrating from an older ccx install
 
-### The `ccx.dogfood` flag
-
-Set with `git config --local ccx.dogfood true` per-repo. Effect:
-
-- `STATE_DIR` short-circuits to `<REPO_ROOT>/.ccx/` (state lives in the working tree).
-- T-3's commit-hygiene pipeline is bypassed; `supervisor:` / `T-N:` commit subjects are retained.
-- `ccx.merge.strategy = merge` becomes legal (otherwise STOPped at config-load time).
-- `ccx verify` accepts `.ccx/` + `.ccx-config` as legitimate (invariants 1, 2, 3, 4 degrade to no-ops; invariant 5 stale-branch hygiene still fires). Invariant 6 is **independent** of dogfood — even dogfood runs need `CCX_PROTECTED_OPTIN=1` to edit `.claude/`, `CLAUDE.md`, or `AGENTS.md`. The per-invocation env-var gate is deliberate (no persistent `git config` knob to misconfigure into accidentally allowing all protected-path edits).
-
-Customer repos should never set this. The flag is read `--local` only — no global or system inheritance — so a `ccx.dogfood = true` on one repo cannot leak into another on the same machine.
-
-### `ccx migrate` — for repos with a committed `.ccx/`
-
-If you adopted ccx before M9 shipped and have a `.ccx/` directory in your worktree (with `BOARD.md`, briefs, worker logs, audit JSONL), the customer-mode promise is restored in a few steps.
-
-**Resolve the destination first.** Future `/ccx:supervisor` runs resolve `STATE_DIR` via the algorithm in the "Where ccx state lives" section above. The customer-mode shape is `<base>/<repo-key>` where `<repo-key> = <basename>-<sha256-7>(remote-url)`. Do NOT eyeball with `$(basename "$(pwd)")` — the hash suffix matters; without it your migrated state lands at a path the next resolver call cannot find.
-
-Two ways to learn the destination:
-
-1. **Inside Claude Code**, run the slash command `/ccx:where`. It prints one line — the absolute `STATE_DIR/` for the current repo. Copy that line.
-2. **From your terminal**, run the shell-level resolver below. (It mirrors `/ccx:where`'s logic verbatim.)
+If you have a `.ccx/` directory in your working tree from a pre-relocation install:
 
 ```bash
-# Shell-level STATE_DIR resolver — mirrors /ccx:where. Run from inside your
-# repo; emits the absolute STATE_DIR with a trailing /.
-ccx_where() {
-  set -eu
-  REPO_ROOT="$(git rev-parse --show-toplevel)"
-  DOGFOOD="$(git config --local --get --type=bool ccx.dogfood 2>/dev/null || echo false)"
-  LINK="$(git config --local --get ccx.link 2>/dev/null || true)"
-  sha7() {
-    if command -v sha256sum >/dev/null 2>&1; then
-      printf '%s' "$1" | sha256sum | cut -c1-7
-    else
-      printf '%s' "$1" | shasum -a 256 | cut -c1-7
-    fi
-  }
-  if [ -n "${CCX_DATA_HOME:-}" ]; then
-    printf '%s/\n' "${CCX_DATA_HOME%/}"; return
-  fi
-  if [ "$DOGFOOD" = "true" ]; then
-    printf '%s/\n' "${REPO_ROOT%/}/.ccx"; return
-  fi
-  if [ -n "$LINK" ]; then
-    KEY="$LINK"
-  else
-    BN="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]')"
-    URL="$(git remote get-url origin 2>/dev/null || true)"
-    if [ -z "$URL" ]; then
-      FIRST_REMOTE="$(git remote 2>/dev/null | head -n1)"
-      [ -n "$FIRST_REMOTE" ] && URL="$(git remote get-url "$FIRST_REMOTE" 2>/dev/null || true)"
-    fi
-    if [ -n "$URL" ]; then
-      KEY="${BN}-$(sha7 "$URL")"
-    else
-      KEY="${BN}-local-$(sha7 "$(cd "$REPO_ROOT" && pwd -P)")"
-    fi
-  fi
-  if [ -n "${XDG_DATA_HOME:-}" ]; then
-    BASE="${XDG_DATA_HOME%/}/ccx"
-  else
-    case "$(uname -s)" in
-      Darwin) BASE="$HOME/Library/Application Support/ccx" ;;
-      *)      BASE="$HOME/.local/share/ccx" ;;
-    esac
-  fi
-  printf '%s/%s/\n' "$BASE" "$KEY"
-}
-DEST="$(ccx_where)"  # e.g. /home/you/.local/share/ccx/myproject-a3f9b2c/
-echo "STATE_DIR resolves to: $DEST"
-```
-
-If you want a more readable directory name (e.g. `myproject` instead of `myproject-a3f9b2c`), run `/ccx:link --name myproject` first; then re-run `ccx_where` (or `/ccx:where`) to pick up the alias.
-
-**Case A: `.ccx/` is committed to your repo's history.**
-
-```bash
-# Use the $DEST resolved above (either by running /ccx:where in Claude and
-# pasting its output, or by sourcing the ccx_where shell function).
-mkdir -p "$DEST"
-
-# 1. Move every state file to the canonical destination.
-mv .ccx/* "$DEST/"
-rmdir .ccx  # should now be empty
-
-# 2. Stop tracking .ccx/. The original copies are already gone (step 1);
-#    this only drops the entries from Git's index.
-git rm -r --cached .ccx/
-
-# 3. Do NOT add `.ccx/` to `.gitignore`. The line is itself a ccx footprint
-#    and invariant 2 forbids it in customer mode. The directory should
-#    simply not exist locally anymore.
-
-# 4. Commit the cleanup with a natural commit message — NO `ccx:` prefix
-#    per the M9 commit-hygiene policy.
-git commit -m "chore: remove vestigial state directory"
-```
-
-After step 4, `/ccx:verify` should exit 0 and `/ccx:supervisor` will read its state from `$DEST` on the next run.
-
-**Case B: `.ccx/` exists only locally (never committed).**
-
-```bash
+DEST="$(claude -p '/ccx:where' | tail -1)"
 mkdir -p "$DEST"
 mv .ccx/* "$DEST/"
 rmdir .ccx
+# If .ccx/ was committed:
+git rm -r --cached .ccx/
+git commit -m "remove vestigial state directory"
 ```
 
-No commit needed — `.ccx/` was never tracked. `/ccx:verify` should exit 0 once the directory is gone. If your `.gitignore` mentions `.ccx`, drop that line too (invariant 2).
+Once `.ccx/` is gone from the worktree, the next `/ccx:supervisor` run reads from `$DEST` automatically.
 
 ## License
 

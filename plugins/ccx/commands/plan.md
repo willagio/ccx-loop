@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 Take a free-form prompt or a document the human already wrote (PRD, design note, ticket export, CLAUDE.md-style note — any format), explore the repo to ground `scope.include` globs on actual files, and write `BOARD.md` task rows as `status: draft`. The human reviews the draft, edits if needed, flips `draft → pending`, and then runs `/ccx:supervisor`.
 
-**M9 state path.** `BOARD.md` lives at `STATE_DIR/BOARD.md`, where `STATE_DIR` is resolved exactly as documented in `plugins/ccx/commands/supervisor.md` → "State path resolver" (SSOT) and `docs/supervisor-design.md` §18. Customer mode places `STATE_DIR` outside the working tree (`$XDG_DATA_HOME/ccx/<repo-key>/`); dogfood mode (`git config ccx.dogfood true`) short-circuits to `REPO_ROOT/.ccx/`. Plan resolves `STATE_DIR` at P0 (the resolver also emits the one-line `ccx state: <STATE_DIR>` stderr announcement) and uses `STATE_DIR/BOARD.md` for every read / write / dirty-check / commit reference below. The `git -C "$REPO_ROOT" …` anchoring rule still applies to scope-glob grounding and the staging/commit step in dogfood mode; in customer mode the BOARD lives outside the working tree, so `git add -- BOARD.md` is replaced by a plain `Write` and no commit is produced (Phase 3 below).
+**State path.** `BOARD.md` lives at `STATE_DIR/BOARD.md`, where `STATE_DIR` is resolved exactly as documented in `plugins/ccx/commands/supervisor.md` → "State path resolver" (SSOT) and `docs/supervisor-design.md` §18. `STATE_DIR` is `$XDG_DATA_HOME/ccx/<repo-key>/` outside the working tree (overridable via `$CCX_DATA_HOME`). Plan resolves `STATE_DIR` at P0 (the resolver emits the one-line `ccx state: <STATE_DIR>` stderr announcement) and uses `STATE_DIR/BOARD.md` for every read / write below. The `git -C "$REPO_ROOT" …` anchoring rule applies to scope-glob grounding. BOARD is not under git tracking — plan `Write`s it directly with no `git add` / `git commit` step.
 
 This command is the `/ccx:supervisor` onboarding path (see §14 of `docs/supervisor-design.md`). Without it, the only route to a valid `BOARD.md` is hand-authoring YAML from the design doc — the onboarding cliff M6 closes.
 
@@ -51,38 +51,9 @@ No other flags for M6. Direction-only updates and row-editing are manual — the
 ## Phase 0: Pre-check
 
 1. Resolve repo root: `REPO_ROOT="$(git rev-parse --show-toplevel)"`. If not inside a git repo, STOP with `/ccx:plan must be run inside a git repository`.
-1a. **Resolve `STATE_DIR` and `IS_DOGFOOD`** per `plugins/ccx/commands/supervisor.md` → "State path resolver" (SSOT — same algorithm; M9). Compute `BOARD_PATH = STATE_DIR/BOARD.md` (absolute). Compute `IS_DOGFOOD` as the **conjunction**: `(STATE_DIR == REPO_ROOT/.ccx/)` AND `(git config --local --get --type=bool ccx.dogfood == true)` — `--local` matches supervisor.md and the T-5 helpers; see §18.4 of the design doc for why every ccx.* read is local-scope. Concretely (identical to supervisor.md's P0 step 1a — both commands MUST use the same string-trim normalization so the resolver's trailing-slash output does not silently misroute one and not the other):
-   ```bash
-   STATE_DIR_NORM="${STATE_DIR%/}"
-   REPO_ROOT_DOGFOOD="${REPO_ROOT%/}/.ccx"
-   DOGFOOD_FLAG="$(git config --local --get --type=bool ccx.dogfood 2>/dev/null || echo false)"
-   if [ "$STATE_DIR_NORM" = "$REPO_ROOT_DOGFOOD" ] && [ "$DOGFOOD_FLAG" = "true" ]; then
-     IS_DOGFOOD=true
-   else
-     IS_DOGFOOD=false
-   fi
-   ```
-   The AND-with-flag clause matters because the resolver's rule 1 (`$CCX_DATA_HOME` override) can land `STATE_DIR` at the dogfood path without the operator ever setting the flag — a customer-mode repo getting an environment override would otherwise silently activate dogfood-mode Phase 3 commits.
+1a. **Resolve `STATE_DIR`** per `plugins/ccx/commands/supervisor.md` → "State path resolver" (SSOT). Compute `BOARD_PATH = STATE_DIR/BOARD.md` (absolute). Plan `Write`s and `Read`s `BOARD_PATH` directly — BOARD is not under git tracking, so there is no dirty-check, no `git add`, and no commit step.
 
-   **In-repo `STATE_DIR` requires explicit dogfood opt-in** (matches supervisor.md's resolver-section rule of the same name; both commands MUST agree). Two rejections:
-   - `STATE_DIR` is inside `REPO_ROOT` AND `ccx.dogfood` is NOT true → STOP with: `STATE_DIR (<STATE_DIR>) lies inside REPO_ROOT but 'git config ccx.dogfood' is not true. Customer-mode invariant 1 forbids ccx state in the working tree without an explicit dogfood opt-in. Either: (a) unset $CCX_DATA_HOME (so the resolver picks an out-of-tree path), (b) point $CCX_DATA_HOME at a directory outside REPO_ROOT, or (c) set 'git config ccx.dogfood true' if you want dogfood-mode commits to .ccx/.`
-   - `STATE_DIR` is inside `REPO_ROOT` AND `ccx.dogfood` IS true AND `STATE_DIR` is NOT exactly `REPO_ROOT/.ccx/` → STOP with: `STATE_DIR (<STATE_DIR>) lies inside REPO_ROOT and ccx.dogfood is set, but STATE_DIR is not the dogfood path REPO_ROOT/.ccx/. Unset $CCX_DATA_HOME or point it at REPO_ROOT/.ccx/.`
-
-   Without this rejection, plan would Write `BOARD_PATH` into an in-repo override path (creating an untracked or modified file in the worktree) and report success, but `/ccx:supervisor` P0 step 3 would refuse the same configuration on its next invocation — leaving the operator with a board the supervisor cannot consume. Both commands rejecting the same inputs keeps the plan→supervisor handoff coherent.
-
-   Every later step that touches BOARD reads or writes `BOARD_PATH`; every `git …` invocation on BOARD is gated on `IS_DOGFOOD == true`. In non-dogfood mode (`IS_DOGFOOD == false`, after the in-repo rejection above means the only remaining case is `STATE_DIR` outside `REPO_ROOT`) the BOARD lives outside the working tree — plan `Write`s and `Read`s `BOARD_PATH` but skips the dirty-check (no git history under the supported predicate — see step 2), skips the Phase 3 commit, and replaces the Phase 4 diff render with a path notification.
-
-   **Repo-root anchoring (load-bearing for in-tree pathspecs).** From this step onward, every `git …` invocation that targets in-tree paths — most importantly the `git ls-files -z -- <glob>` scope-grounding probe (Phase 1 step 3) and the dogfood Phase 3 staging + commit — MUST be anchored to `REPO_ROOT` via the `git -C "$REPO_ROOT" …` form. Bare `git …` without `-C` resolves pathspecs relative to the caller's current directory, which breaks two contracts the supervisor later relies on:
-   - `scope.include` globs in BOARD are evaluated by `/ccx:supervisor` from `REPO_ROOT` (see its M4 overlap gate in supervisor.md §P2.4). If plan grounds a glob from a subdirectory, the match set it validates against is a different set than the supervisor will see at dispatch — the persisted scope would be semantically wrong.
-   - In dogfood mode `BOARD_PATH` lives inside the working tree (`REPO_ROOT/.ccx/BOARD.md`). If plan runs `git status -- BOARD.md`, `git add -- BOARD.md`, or `git show HEAD -- BOARD.md` from a nested directory, the pathspec resolves to `<cwd>/BOARD.md` — potentially a different (likely absent) file — so the dirty check, the stage, and the diff report can all target the wrong path. The dogfood paths used in such commands are `.ccx/BOARD.md` (the in-tree subpath of `BOARD_PATH`), not a bare `BOARD.md`; pass the in-tree subpath explicitly to `git -- …`. In customer mode there is no in-tree pathspec — the BOARD is absolute and outside the tree; plan does not run `git` against it.
-
-   The `-C "$REPO_ROOT"` prefix makes every in-tree-anchored command below behave as if invoked from the repo root regardless of where the user actually ran `/ccx:plan` from. The quoting matters: `"$REPO_ROOT"` may contain spaces on platforms where the repo is checked out under a path like `~/Client Projects/foo`. Treat any path mentioned in `Read` / `Write` / `Edit` calls the same way — always pass `BOARD_PATH` as an absolute path, never a bare `BOARD.md`.
-2. **[dogfood only]** Verify that BOARD is not dirty in the working tree. Only this one file matters, not the rest of the tree:
-   - When `IS_DOGFOOD == true`: Run `git -C "$REPO_ROOT" status --porcelain=v1 -z -- .ccx/BOARD.md`. If the output is empty, proceed.
-   - If non-empty (BOARD is modified, staged, or both), STOP with: `BOARD has uncommitted changes — commit or stash them before running /ccx:plan (plan would overwrite or append to those edits).` Default mode would clobber the edits with a fresh Write; append mode would Edit them and risk silent mis-insertion around a shifted closing fence.
-   - When `IS_DOGFOOD == false`: skip this step entirely. The customer-mode BOARD has no git history to be dirty against; plan owns the file outright and overwrites or appends without a clean-tree gate.
-
-   **Do NOT gate on the rest of the working tree.** Unrelated uncommitted edits — most importantly the `--from <path>` source document itself when the user just wrote it in the repo — are fine. Phase 3's dogfood-mode `git add -- .ccx/BOARD.md` stages only that path, so no other dirty path can contaminate the plan commit. This permissiveness is load-bearing for the headline `--from` workflow: the user writes a PRD in the repo, runs `/ccx:plan --from docs/prd.md`, and sees their draft turned into task rows. Forcing the PRD to be committed first would kill that flow.
+   **Repo-root anchoring (load-bearing for in-tree pathspecs).** From this step onward, every `git …` invocation that targets in-tree paths — most importantly the `git ls-files -z -- <glob>` scope-grounding probe (Phase 1 step 3) — MUST be anchored to `REPO_ROOT` via the `git -C "$REPO_ROOT" …` form. Bare `git …` without `-C` resolves pathspecs relative to the caller's current directory, which would mean `scope.include` globs are evaluated against a different set than the supervisor will see at dispatch (see its M4 overlap gate in supervisor.md §P2.4). The `-C "$REPO_ROOT"` prefix makes every in-tree-anchored command below behave as if invoked from the repo root regardless of where the user actually ran `/ccx:plan` from. The quoting matters: `"$REPO_ROOT"` may contain spaces on platforms where the repo is checked out under a path like `~/Client Projects/foo`. Always pass `BOARD_PATH` as an absolute path, never a bare `BOARD.md`.
 3. Parse the arguments above into `INPUT_MODE ∈ {prompt, from}`, `APPEND ∈ {true, false}`, `INPUT_RAW` (the prompt string or the contents of `--from <path>`), and `INPUT_LABEL` (`"prompt"` or `"from <path>"`).
 4. `BOARD_PATH` is already resolved in step 1a. Apply the mode matrix above against `BOARD_PATH` (file existence check uses the absolute path). STOP on the error cases listed there.
 5. If `INPUT_MODE == "from"`:
@@ -208,87 +179,40 @@ If any check fails, STOP — do NOT commit. Leave the modified `BOARD.md` on dis
 
 ---
 
-## Phase 3: Commit
+## Phase 3: Persist
 
-**Dogfood-only.** Phase 3 fires only when `IS_DOGFOOD == true` (BOARD is in the working tree at `REPO_ROOT/.ccx/BOARD.md`). In customer mode (`IS_DOGFOOD == false`), BOARD lives outside the working tree at `STATE_DIR/BOARD.md`; the Phase 2 `Write` / `Edit` is the commit — there is no `git add` / `git commit` step, and Phase 4 below replaces the diff render with a path notification.
+BOARD lives outside the working tree at `STATE_DIR/BOARD.md`. The Phase 2 `Write` / `Edit` is the persisted form — there is no `git add` / `git commit` step. Plan owns the file outright and writes it directly.
 
-Stage and commit exactly one file. The commit MUST be path-limited to the in-tree BOARD subpath so that any unrelated paths the user happened to have in the index (from before invoking `/ccx:plan`) are NOT swept into the plan commit — Phase 0's dirty-tree check only refuses a dirty BOARD, so the rest of the index could contain pre-existing WIP and a bare `git commit` would publish it:
-
-```bash
-# Dogfood mode: BOARD_PATH resolves to REPO_ROOT/.ccx/BOARD.md; the in-tree subpath is `.ccx/BOARD.md`.
-git -C "$REPO_ROOT" add -- .ccx/BOARD.md
-# `git commit -- <paths>` uses --only semantics: it snapshots the on-disk
-# contents of the specified paths (ignoring whatever else is staged),
-# commits exactly those paths, and leaves any other staged entries in the
-# index untouched after the commit. This enforces the "exactly one file"
-# contract regardless of what the user had staged before running plan.
-git -C "$REPO_ROOT" commit -m "$(cat <<'EOF'
-supervisor: plan draft
-
-<one-line summary of what was planned — e.g. "seeded 7 tasks from prompt: add OAuth2 login flow"
-or "appended 3 tasks from docs/prd-feature-z.md">
-EOF
-)" -- .ccx/BOARD.md
-```
-
-Commit-message contract (dogfood mode only):
-- **Subject** is `supervisor: plan draft` — the `/ccx:supervisor` P0 / P2.1 / audit tooling keys log scans off the `supervisor:` prefix; a different subject would bypass those scans. T-3 (commit hygiene) revisits this subject under M9 invariant 3 — even in dogfood the `supervisor:` prefix is reviewed there; until T-3 lands, the subject above is retained for backwards compatibility.
-- **Body** is a one-line summary of the planning action (count of tasks added + input source). No trailing blank lines.
-- No `Co-Authored-By` line — plan is a deterministic tool action, not a coding contribution. (Loop/forever commits include the Claude co-author because those commits contain Claude-authored code changes; plan commits contain only structured metadata and do not need the attribution.)
-
-If the commit fails (pre-commit hook rejects BOARD edits, signing failure, branch protection):
-1. Do NOT retry with `--no-verify` — hooks exist for a reason.
-2. Leave the BOARD file modified on disk (unstaged or staged, depending on where the hook rejected).
-3. STOP and tell the user: `commit failed — BOARD is modified on disk at <BOARD_PATH>; resolve the hook failure, then stage and commit manually`.
+If the Write fails (permission denied, disk full, etc.), STOP and tell the user: `failed to write BOARD at <BOARD_PATH>: <error>`.
 
 ---
 
 ## Phase 4: Report
 
-After a successful commit (dogfood) or a successful `Write` (customer mode), print:
+After a successful `Write`, print:
 
 1. A one-line header: `planned <N> tasks — T-<first>..T-<last>, status: draft`.
-2. The diff or path:
-   - **Dogfood** (`IS_DOGFOOD == true`): the diff introduced by the plan commit — use `git -C "$REPO_ROOT" show HEAD -- .ccx/BOARD.md`, NOT `git diff HEAD~1 -- .ccx/BOARD.md`. `git show HEAD` works whether or not `HEAD~1` exists, so it correctly handles the case where `/ccx:plan`'s commit is the very first commit in a freshly initialized repository (`HEAD~1` would be an invalid revision and would fail the report after the real work succeeded). The `-C "$REPO_ROOT"` prefix ensures the pathspec resolves to the in-tree BOARD path even when the user invoked `/ccx:plan` from a nested directory.
-   - **Customer mode** (`IS_DOGFOOD == false`): there is no commit and no in-tree path. Print `BOARD written to <BOARD_PATH>` (the absolute path resolved in Phase 0 step 1a) and a brief reminder that the file lives outside the working tree by design (M9 invariant 1).
+2. `BOARD written to <BOARD_PATH>` (the absolute path resolved in Phase 0 step 1a).
 3. Per-task summary: `T-<id>  <title>  (scope: <file-count> files across <glob-count> globs)`. If any glob matched zero files, append `  [new-file-scope]` so the human spots it on review.
-4. A footer with the exact next steps. Two variants:
-
-   **Dogfood mode** (`IS_DOGFOOD == true`):
-   ```
-   Next steps:
-     1. Review .ccx/BOARD.md. Edit any draft row (title, scope.include, depends_on, notes) as needed.
-     2. For each task you want to dispatch, change `status: draft` to `status: pending`.
-     3. Commit your edits — `/ccx:supervisor` refuses to run on a dirty tree:
-          git add -- .ccx/BOARD.md
-          git commit -m "board: review + flip N tasks to pending"
-     4. Run `/ccx:supervisor` to dispatch the pending tasks.
-
-   To add more tasks later: `/ccx:plan --append "<prompt>"` or `/ccx:plan --append --from <path>`.
-   ```
-
-   The commit step is load-bearing in dogfood: `/ccx:supervisor` P0 step 3 requires `git status --porcelain` to be empty before it starts dispatching, so any uncommitted review edits to BOARD (or to files touched while the user was reviewing) will block the supervisor run. Spelling out the `git add` + `git commit` here prevents users from hitting that gate mid-run and having to recover.
-
-   **Customer mode** (`IS_DOGFOOD == false`):
+4. Footer with next steps:
    ```
    Next steps:
      1. Review <BOARD_PATH>. Edit any draft row (title, scope.include, depends_on, notes) as needed.
-        (BOARD lives outside the working tree at <BOARD_PATH> — edits to it are not under git
-         and never need staging or committing. Use `/ccx:board` from the repo to re-open it in
-         $EDITOR later, or `/ccx:where` to print the resolved state path.)
+        BOARD lives outside the working tree — edits to it are not under git and never need
+        staging or committing. Use `/ccx:board` from the repo to re-open it in $EDITOR later,
+        or `/ccx:where` to print the resolved state path.
      2. For each task you want to dispatch, change `status: draft` to `status: pending`.
-     3. Make sure the rest of your working tree is clean — `/ccx:supervisor` P0 step 3 still
-        refuses to start on a dirty tree even though BOARD itself is exempt. Commit or stash
-        any unrelated edits (PRD source documents, scratch files, the `--from <path>` source
-        if you have not committed it yet) before continuing.
+     3. Make sure the rest of your working tree is clean — `/ccx:supervisor` P0 step 3
+        refuses to start on a dirty tree. Commit or stash any unrelated edits (PRD source
+        documents, scratch files, the `--from <path>` source if you have not committed it
+        yet) before continuing.
      4. Run `/ccx:supervisor` to dispatch the pending tasks.
 
    To add more tasks later: `/ccx:plan --append "<prompt>"` or `/ccx:plan --append --from <path>`.
    To inspect the queue without opening BOARD: `/ccx:tasks` (lists tasks + status; `--status` filters).
-   To pin this repo's state directory to a readable name: `/ccx:link --name <readable>`.
    ```
 
-   In customer mode the BOARD itself is not in the working tree, so edits to it never trip the supervisor's clean-tree gate; everything ELSE in the working tree still does, including the `--from <path>` source document the user just wrote. The footer surfaces that explicitly so the headline `--from` workflow does not break at the supervisor handoff. Substitute the resolved `<BOARD_PATH>` literally so the user knows exactly which file to edit.
+   Substitute the resolved `<BOARD_PATH>` literally so the user knows exactly which file to edit.
 
 This is the exit contract — plan does not run the supervisor, does not set any task `pending`, and does not touch `STATE_DIR/tasks/`.
 

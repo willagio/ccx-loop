@@ -6,7 +6,7 @@ allowed-tools: Bash
 
 # /ccx:tasks — List tasks at the resolved STATE_DIR
 
-Inspection helper introduced in M9 T-5. The supervisor's per-task briefs live at `STATE_DIR/tasks/T-<id>.md` and the queue+status of those tasks lives in `STATE_DIR/BOARD.md`. `/ccx:tasks` joins the two and prints one line per task — handy for "what's queued" / "what's in review" / "what's blocked" without opening BOARD in an editor.
+Inspection helper. The supervisor's per-task briefs live at `STATE_DIR/tasks/T-<id>.md` and the queue+status of those tasks lives in `STATE_DIR/BOARD.md`. `/ccx:tasks` joins the two and prints one line per task — handy for "what's queued" / "what's in review" / "what's blocked" without opening BOARD in an editor.
 
 ## Argument Parsing
 
@@ -54,9 +54,6 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "fatal: /ccx:tasks must be run inside a git repository" >&2
   exit 1
 }
-DOGFOOD_FLAG="$(git config --local --get --type=bool ccx.dogfood 2>/dev/null || echo false)"
-LINK_NAME="$(git config --local --get ccx.link 2>/dev/null || true)"
-
 sha7() {
   if command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "$1" | sha256sum | cut -c1-7
@@ -71,24 +68,18 @@ if [ -n "${CCX_DATA_HOME:-}" ]; then
     *)  STATE_DIR="$PWD/$CCX_DATA_HOME" ;;
   esac
   STATE_DIR="${STATE_DIR%/}"
-elif [ "$DOGFOOD_FLAG" = "true" ]; then
-  STATE_DIR="${REPO_ROOT%/}/.ccx"
 else
-  if [ -n "$LINK_NAME" ]; then
-    REPO_KEY="$LINK_NAME"
+  BASENAME="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]')"
+  URL="$(git remote get-url origin 2>/dev/null || true)"
+  if [ -z "$URL" ]; then
+    FIRST_REMOTE="$(git remote 2>/dev/null | head -n1)"
+    [ -n "$FIRST_REMOTE" ] && URL="$(git remote get-url "$FIRST_REMOTE" 2>/dev/null || true)"
+  fi
+  if [ -n "$URL" ]; then
+    REPO_KEY="${BASENAME}-$(sha7 "$URL")"
   else
-    BASENAME="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]')"
-    URL="$(git remote get-url origin 2>/dev/null || true)"
-    if [ -z "$URL" ]; then
-      FIRST_REMOTE="$(git remote 2>/dev/null | head -n1)"
-      [ -n "$FIRST_REMOTE" ] && URL="$(git remote get-url "$FIRST_REMOTE" 2>/dev/null || true)"
-    fi
-    if [ -n "$URL" ]; then
-      REPO_KEY="${BASENAME}-$(sha7 "$URL")"
-    else
-      RP="$(cd "$REPO_ROOT" && pwd -P)"
-      REPO_KEY="${BASENAME}-local-$(sha7 "$RP")"
-    fi
+    RP="$(cd "$REPO_ROOT" && pwd -P)"
+    REPO_KEY="${BASENAME}-local-$(sha7 "$RP")"
   fi
   if [ -n "${XDG_DATA_HOME:-}" ]; then
     BASE="${XDG_DATA_HOME%/}/ccx"
@@ -100,34 +91,6 @@ else
   fi
   STATE_DIR="${BASE}/${REPO_KEY}"
 fi
-
-# In-repo STATE_DIR rejection — mirror supervisor.md "In-repo STATE_DIR
-# requires explicit dogfood opt-in". Keeps the inspection helpers from
-# listing state files the supervisor would refuse to touch.
-STATE_DIR_NORM="${STATE_DIR%/}"
-REPO_ROOT_DOGFOOD="${REPO_ROOT%/}/.ccx"
-case "$STATE_DIR_NORM" in
-  "$REPO_ROOT"|"$REPO_ROOT"/*)
-    if [ "$DOGFOOD_FLAG" != "true" ]; then
-      cat >&2 <<EOF
-fatal: STATE_DIR ($STATE_DIR_NORM) lies inside REPO_ROOT but 'git config ccx.dogfood' is not true.
-Customer-mode invariant 1 forbids ccx state in the working tree without an explicit dogfood opt-in.
-Either: (a) unset \$CCX_DATA_HOME (so the resolver picks an out-of-tree path), (b) point
-\$CCX_DATA_HOME at a directory outside REPO_ROOT (e.g. /tmp/ccx-test), or (c) set
-'git config ccx.dogfood true' if you actually want dogfood-mode commits to .ccx/.
-EOF
-      exit 3
-    fi
-    if [ "$STATE_DIR_NORM" != "$REPO_ROOT_DOGFOOD" ]; then
-      cat >&2 <<EOF
-fatal: STATE_DIR ($STATE_DIR_NORM) lies inside REPO_ROOT and ccx.dogfood is set, but STATE_DIR is
-not the dogfood path $REPO_ROOT_DOGFOOD. Unset \$CCX_DATA_HOME so the dogfood short-circuit returns
-REPO_ROOT/.ccx/, or point \$CCX_DATA_HOME at $REPO_ROOT_DOGFOOD explicitly.
-EOF
-      exit 3
-    fi
-    ;;
-esac
 
 TASKS_DIR="${STATE_DIR%/}/tasks"
 BOARD_PATH="${STATE_DIR%/}/BOARD.md"
@@ -320,7 +283,7 @@ $ /ccx:tasks
  T-2  merged      M9: external worktrees — git worktree add under $STATE/worktrees/
  T-3  merged      M9: commit message hygiene — style mirror + marker strip
  T-4  merged      M9: merge strategy — squash default + branch cleanup
- T-5  assigned    M9: inspection helpers + ccx.dogfood flag
+ T-5  assigned    M9: inspection helpers
 *T-6  pending     M9: ccx verify (zero-footprint gate) + customer-mode README section
 
 6 task(s) listed
