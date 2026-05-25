@@ -11,7 +11,7 @@ The plugin ships four commands:
 | `/ccx:loop`       | Run a fixed number of review-fix cycles (default 2). |
 | `/ccx:forever`    | Repeat review-fix cycles until Codex approves (safety cap default 100). |
 | `/ccx:plan`       | Seed (or extend with `--append`) the external `BOARD.md` task queue from a prompt or document — onboarding path for `/ccx:supervisor`. |
-| `/ccx:supervisor` | Dispatch N parallel Claude↔Codex duet workers from the external `BOARD.md` (autonomous chat_ask + scope-overlap gate + squash merge + automatic tier escalation). |
+| `/ccx:supervisor` | Dispatch N parallel Claude↔Codex duet workers from the external `BOARD.md` (autonomous chat_ask + scope-overlap gate + squash merge + visible model ladder). |
 
 ## Install
 
@@ -96,10 +96,10 @@ Takes a free-form prompt or a reference to a document the user already wrote (PR
 ### `/ccx:supervisor` — parallel orchestrator
 
 ```
-/ccx:supervisor [--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-loops N] [--max-attempts N] [--start-tier <alias>] [--chat] [--dry-run]
+/ccx:supervisor [--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-loops N] [--start-tier auto|economy|default|strong|max] [--chat] [--dry-run]
 ```
 
-Drives N parallel `/ccx:loop --duet` workers from `STATE_DIR/BOARD.md`, outside the repo working tree. Each task gets an external worktree under `STATE_DIR/worktrees/`, a brief file under `STATE_DIR/tasks/`, and one squash merge commit on approval. Worker `chat_ask` calls are intercepted by the broker and answered autonomously from the brief / BOARD direction / merge history when possible; ambiguous asks escalate to Discord. When a worker exits without approval, the supervisor re-dispatches the task automatically along a fixed 5-rung model ladder — `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)` — bumping one rung on `stuck` exits and retrying the same rung on `cycle-cap`, until the task merges or the `--max-attempts` budget runs out. A `stuck` exit at the top rung (`opus/max`) is the only remaining human gate.
+Drives N parallel `/ccx:loop --duet` workers from `STATE_DIR/BOARD.md`, outside the repo working tree. Each task gets an external worktree under `STATE_DIR/worktrees/`, a brief file under `STATE_DIR/tasks/`, and one squash merge commit on approval. Worker `chat_ask` calls are intercepted by the broker and answered autonomously from the brief / BOARD direction / merge history when possible; ambiguous asks escalate to Discord. The supervisor prints the active model ladder before dispatch and passes the selected start tier to each duet worker. Claude runs at that start tier for the worker's lifetime; Codex can advance through the ladder by duet cycle via `--model`.
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -107,34 +107,43 @@ Drives N parallel `/ccx:loop --duet` workers from `STATE_DIR/BOARD.md`, outside 
 | `--integration BRANCH` | Branch merges land on | current branch |
 | `--max-tasks M` | Stop after M merges | unlimited |
 | `--worker-loops N` | `--loops N` passed to each duet worker (2–20) | 3 |
-| `--max-attempts N` | Max automatic worker dispatches per task (tier bumps + same-tier retries). Exempt branch: `opus/max` stuck → human prompt. | 4 |
-| `--start-tier <alias>` | First-attempt rung on the 5-rung ladder: `haiku \| sonnet \| opus \| opus-xhigh \| opus-max` | `sonnet` |
+| `--start-tier <alias>` | Override every task's starting rung: `auto \| economy \| default \| strong \| max`. `auto` uses each row's `model_start`. | `auto` |
 | `--chat` | Register a supervisor session with the ccx-chat broker and post lifecycle events (dispatch, merge, block, stuck prompt, run end) to Discord | off |
 | `--dry-run` | Print dispatch plan, don't commit or spawn | off |
 
-**Tier escalation.** Every worker spawn is parameterized by a rung on this fixed ladder (no config file, no per-task override):
+**Model ladder.** The built-in ladder is fixed and visible, but users can replace it by writing `STATE_DIR/model-ladder.json`. The default Codex model is `gpt-5.5`; no `mini` model is used by default. Claude's selected tier is fixed at worker spawn; Codex uses the ladder per cycle.
 
-| Rung | `--model` | `--effort` | Typical use                                            |
-|------|-----------|------------|--------------------------------------------------------|
-| 0    | `haiku`   | `medium`   | Docs tweaks, one-liner fixes, small mechanical changes |
-| 1    | `sonnet`  | `medium`   | Default start-tier; most implementation tasks          |
-| 2    | `opus`    | `high`     | First escalation for non-trivial logic work            |
-| 3    | `opus`    | `xhigh`    | Second escalation when opus/high could not finish      |
-| 4    | `opus`    | `max`      | Terminal rung — nothing higher to escalate to          |
+| Alias | Claude `--model` | Claude `--effort` | Codex `--model` | Typical use |
+|-------|------------------|-------------------|-----------------|-------------|
+| `economy` | `sonnet` | `medium` | `gpt-5.5` | Small docs, obvious one-file fixes |
+| `default` | `sonnet` | `high` | `gpt-5.5` | Normal implementation tasks |
+| `strong` | `opus` | `high` | `gpt-5.5` | Cross-file logic or ambiguous design |
+| `max` | `opus` | `max` | `gpt-5.5` | Hard failures, architecture, high-risk changes |
 
-Motion on the ladder is driven by the worker's exit:
+`/ccx:plan` writes `model_start: economy|default|strong|max` on each task row. The planner chooses the cheapest rung it expects can finish the task; the human can edit it before flipping `draft → pending`. `--start-tier auto` respects the row. Passing `--start-tier strong`, for example, overrides every task for that supervisor run.
 
-- `stuck` (same Codex finding across 3 consecutive cycles) → **one rung up**, `attempts++`, re-dispatch. At rung 4 (`opus/max`), `stuck` falls through to an `AskUserQuestion` human prompt — the only remaining manual gate, exempt from `--max-attempts`.
-- `cycle-cap` (`--worker-loops` exhausted without stuck firing) → **same rung**, `attempts++`, re-dispatch until `attempts >= --max-attempts`, then block as `attempts-exhausted`.
-- `approved` → merge, no re-dispatch.
+Custom ladder file:
 
-`--start-tier` chooses the first rung; lower rungs are unreachable for that run. The default `--max-attempts 4` exactly covers a pure stuck climb from `sonnet` → `opus/high` → `opus/xhigh` → `opus/max`, so the top-rung human prompt is reachable without raising the budget. `--start-tier haiku` needs at least `--max-attempts 5` to walk all five rungs on stuck exits.
+```json
+{
+  "default_start": "default",
+  "tiers": [
+    {
+      "alias": "default",
+      "claude": { "model": "sonnet", "effort": "high" },
+      "codex": { "model": "gpt-5.5" }
+    }
+  ]
+}
+```
+
+The supervisor rejects duplicate aliases, missing `claude.model`, missing `codex.model`, or a `default_start` that is not present in `tiers`. `model_start` values in BOARD must reference an active alias; this keeps task rows readable while letting the operator remap aliases to newer model IDs later without editing every task.
 
 **Supervisor duet.** There is no `--duet` supervisor flag because supervisor workers always run in duet mode. The worker spawn is `/ccx:loop --duet --loops <N> --commit --chat`; `--worker-loops` therefore starts at 2 because duet convergence needs two reviewer turns.
 
 **M8a infra notes.** Worker exit detection reads `claude agents --json` (matched by `cwd == meta.worktree_path`), and Phase P0 best-effort fast-forwards your local integration branch to `origin/<INTEGRATION>` so each worker worktree forks from a fresh upstream base. If there is no remote, the supervisor uses local HEAD.
 
-Milestones shipped: M1 dispatch + naive merge, M2 broker supervisor adapter, M3 autonomous chat_ask answering, M4 scope-overlap gate + pre-merge dry-run, M5 stuck-exit auto-revise + re-dispatch, M6 `/ccx:plan` onboarding (separate command above), M7 automatic model tier escalation, M8a `claude agents --json` exit detection + fresh-upstream worker base, M8b supervisor duet workers. See `docs/supervisor-design.md` for the full design.
+Milestones shipped: M1 dispatch + naive merge, M2 broker supervisor adapter, M3 autonomous chat_ask answering, M4 scope-overlap gate + pre-merge dry-run, M6 `/ccx:plan` onboarding (separate command above), M8a `claude agents --json` exit detection + fresh-upstream worker base, M8b supervisor duet workers, visible/customizable duet model ladder. See `docs/supervisor-design.md` for the full design.
 
 ### Examples
 
@@ -188,7 +197,7 @@ Phase 4: Commit (gated — unresolved / test failure / cap-hit / stuck-exit bloc
 - **Auto-commit gate.** `--commit` only fires when the loop exited cleanly (approved/filtered-clean), tests pass, and no findings are unresolved. Otherwise it downgrades to an interactive prompt.
 - **Explicit staging.** Only files the loop intentionally edits (Edit/Write + intentional Bash ops like `mv`, `rm`, formatters) are staged. Generated artifacts like coverage output never slip in.
 - **Dirty-tree handling.** Pre-existing uncommitted changes are parsed via `git status -z` and handled explicitly. A hunk-granularity caveat is documented: if Claude edits a file that was already dirty, the user's prior hunks will be committed too (stash to avoid).
-- **Duet mode** (`--duet`). Two different reviewers (Codex and Claude) must approve consecutively to terminate. Any reject by either reviewer, or any non-empty implementer diff between the two approvals, resets the convergence counter. The Claude side of the ladder uses the M7 tier escalation when run under `/ccx:supervisor`; Codex stays at its default model.
+- **Duet mode** (`--duet`). Two different reviewers (Codex and Claude) must approve consecutively to terminate. Any reject by either reviewer, or any non-empty implementer diff between the two approvals, resets the convergence counter. Under `/ccx:supervisor`, Claude uses the resolved start tier for the whole worker and Codex uses the active ladder per cycle.
 
 If Codex is not installed, implementation is preserved on disk and you're prompted to install it — no unreviewed commit.
 

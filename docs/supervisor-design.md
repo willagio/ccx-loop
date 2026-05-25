@@ -15,6 +15,7 @@ All supervisor state lives outside the repo:
 - `STATE_DIR/workers/T-<id>.log` — worker logs.
 - `STATE_DIR/supervisor-audit/<RUN_ID>.jsonl` — autonomous answer and retry audit.
 - `STATE_DIR/worktrees/T-<id>/` — worker git worktrees.
+- `STATE_DIR/model-ladder.json` — optional user override for the visible Claude/Codex model ladder.
 
 `STATE_DIR` resolution:
 
@@ -43,6 +44,7 @@ Inspection commands:
     exclude: []
   status: draft
   priority: normal
+  model_start: default
   depends_on: []
   brief: tasks/T-1.md
   attempts: 0
@@ -64,6 +66,8 @@ Statuses:
 - `merged` — landed on the integration branch.
 - `blocked` — requires human action.
 
+`model_start` is a task-readable alias into the active model ladder. Built-in aliases are `economy`, `default`, `strong`, and `max`; `/ccx:plan` chooses one per task and the human can edit it before dispatch. Missing or `auto` resolves to the active ladder's `default_start`.
+
 ## Briefs
 
 The supervisor writes briefs to `STATE_DIR/tasks/T-<id>.md` at dispatch time. The worker receives the absolute brief path in the dispatch prompt and must only read it when it matches the trusted `CCX_TASK_BRIEF_PATH` and `CCX_TASK_ID` environment variables set by the supervisor. Brief frontmatter is BOARD-derived; worker flags are not task data.
@@ -75,8 +79,9 @@ For each ready task, the supervisor:
 1. Verifies no stale `duet/<task_id>` branch or `STATE_DIR/worktrees/<task_id>/` exists.
 2. Writes the brief under `STATE_DIR/tasks/`.
 3. Creates a worker worktree at `STATE_DIR/worktrees/<task_id>/`.
-4. Spawns `claude -p` with `/ccx:loop --duet --loops <N> --commit --chat` and model tier flags.
-5. Tracks the worker by branch, worktree path, log path, attempt count, and tier.
+4. Loads the active ladder from `STATE_DIR/model-ladder.json` or the built-in default, prints it, and resolves this task's start alias.
+5. Writes `STATE_DIR/model-ladder.effective.json`, then spawns `claude -p` with `/ccx:loop --duet --loops <N> --commit --chat`, passing the effective ladder path and task start tier through environment variables.
+6. Tracks the worker by branch, worktree path, log path, attempt count, and start tier.
 
 The scope-overlap gate prevents dispatching two tasks whose `scope.include` globs touch the same tracked file.
 
@@ -84,18 +89,27 @@ The scope-overlap gate prevents dispatching two tasks whose `scope.include` glob
 
 Worker exit detection primarily uses `claude agents --json`, matched by `cwd == meta.worktree_path`. The worker's `chat_close` status is used to distinguish `approved`, `stuck`, `budget-exhausted`, `aborted`, and `error` paths.
 
-`stuck` and `budget-exhausted` are recoverable:
-
-- `stuck` below the top tier bumps one rung up.
-- `budget-exhausted` retries the same rung.
-- `stuck` at `opus/max` asks the human for guidance.
-- Automatic paths are bounded by `--max-attempts`.
-
-The fixed tier ladder is:
+Codex model selection can strengthen inside one worker session by duet cycle:
 
 ```text
-haiku/medium -> sonnet/medium -> opus/high -> opus/xhigh -> opus/max
+economy -> default -> strong -> max
 ```
+
+The built-in ladder maps those aliases to Claude/Codex settings:
+
+```json
+{
+  "default_start": "default",
+  "tiers": [
+    { "alias": "economy", "claude": { "model": "sonnet", "effort": "medium" }, "codex": { "model": "gpt-5.5" } },
+    { "alias": "default", "claude": { "model": "sonnet", "effort": "high" }, "codex": { "model": "gpt-5.5" } },
+    { "alias": "strong", "claude": { "model": "opus", "effort": "high" }, "codex": { "model": "gpt-5.5" } },
+    { "alias": "max", "claude": { "model": "opus", "effort": "max" }, "codex": { "model": "gpt-5.5" } }
+  ]
+}
+```
+
+Claude is fixed by the worker's initial `claude -p --model/--effort` spawn. The supervisor does not claim to change Claude's in-session model by cycle.
 
 ## Merge
 
@@ -112,7 +126,7 @@ There is no merge-strategy config, rebase path, or merge-commit-producing path.
 
 ## Cleanup
 
-After a merged exit, the supervisor removes the worktree first and then deletes `duet/<task_id>`. Blocked exits remove the worktree but preserve the branch for inspection, except recovery paths that intentionally delete and recreate the branch before re-dispatch.
+After a merged exit, the supervisor removes the worktree first and then deletes `duet/<task_id>`. Blocked exits remove the worktree but preserve the branch for inspection.
 
 ## Non-Goals
 

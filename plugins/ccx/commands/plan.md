@@ -84,7 +84,13 @@ The single biggest failure mode is hallucinated scopes — decomposing a task in
    - Under 1: `input did not decompose into any tasks — try a more concrete prompt or narrower document scope`.
    - Over 25: `input decomposed into <N> tasks — too many for one plan. Re-run with a narrower slice, or split the document into sections and run --append per section`.
 
-Output of this phase: an in-memory list `PLANNED_TASKS` with fields `{ title, scope_include (grounded globs + match counts), depends_on (forward-references by position), notes (≤500 chars, explicit about zero-match globs and new-file creation) }`.
+6. **Model start selection.** Load the active ladder aliases the same way `/ccx:supervisor` does: `STATE_DIR/model-ladder.json` when present, otherwise the built-in alias set `economy | default | strong | max`. For each candidate unit, choose `model_start` from those active aliases. This is an alias, not a raw model id. For the built-in aliases, pick the cheapest rung that is likely to finish:
+   - `economy` — docs, config, tests, one-file mechanical changes, obvious bug fixes.
+   - `default` — normal implementation work with clear local context.
+   - `strong` — cross-file logic, ambiguous behavior, data migrations, concurrency, security-sensitive changes.
+   - `max` — architecture-heavy work, high-risk refactors, or tasks where the input itself says prior attempts failed.
+
+Output of this phase: an in-memory list `PLANNED_TASKS` with fields `{ title, scope_include (grounded globs + match counts), depends_on (forward-references by position), model_start, notes (≤500 chars, explicit about zero-match globs and new-file creation) }`.
 
 ---
 
@@ -144,6 +150,7 @@ Every emitted row MUST match this shape exactly:
     exclude: []
   status: draft
   priority: normal
+  model_start: <active ladder alias>
   depends_on: []
   brief: tasks/T-<n>.md
   attempts: 0
@@ -164,6 +171,7 @@ Every emitted row MUST match this shape exactly:
 Rules:
 - `status: draft` — hardcoded. Never `pending`, never any other value.
 - `priority: normal` — hardcoded for M6. Humans adjust priority on review.
+- `model_start` — one active ladder alias. The planner chooses this alias from the task shape; humans may edit it before flipping the row to `pending`. Do NOT emit raw model ids here. The supervisor maps aliases through its active ladder (`STATE_DIR/model-ladder.json` override or built-in default), so aliases stay readable even when model ids change later.
 - `depends_on: []` by default; populated with ids only when Phase 1 step 4 inferred a dependency.
 - `brief: tasks/T-<n>.md` — logical path relative to `STATE_DIR`. Supervisor never reads this field for path resolution — it derives `STATE_DIR/tasks/<id>.md` from the task id directly — so the field is a stable annotation, not a runtime lookup key. No brief file is created at plan time; supervisor creates it at dispatch.
 - `attempts: 0` and every `*_at` / `worker_pid` / `exit_status` / `worktree` / `branch` field are `null` / `0` as shown — supervisor-managed runtime state, placeholders only.
