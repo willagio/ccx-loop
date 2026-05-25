@@ -8,9 +8,9 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 Take a free-form prompt or a document the human already wrote (PRD, design note, ticket export, CLAUDE.md-style note — any format), explore the repo to ground `scope.include` globs on actual files, and write `BOARD.md` task rows as `status: draft`. The human reviews the draft, edits if needed, flips `draft → pending`, and then runs `/ccx:supervisor`.
 
-**State path.** `BOARD.md` lives at `STATE_DIR/BOARD.md`, where `STATE_DIR` is resolved exactly as documented in `plugins/ccx/commands/supervisor.md` → "State path resolver" (SSOT) and `docs/supervisor-design.md` §18. `STATE_DIR` is `$XDG_DATA_HOME/ccx/<repo-key>/` outside the working tree (overridable via `$CCX_DATA_HOME`). Plan resolves `STATE_DIR` at P0 (the resolver emits the one-line `ccx state: <STATE_DIR>` stderr announcement) and uses `STATE_DIR/BOARD.md` for every read / write below. The `git -C "$REPO_ROOT" …` anchoring rule applies to scope-glob grounding. BOARD is not under git tracking — plan `Write`s it directly with no `git add` / `git commit` step.
+**State path.** `BOARD.md` lives at `STATE_DIR/BOARD.md`, where `STATE_DIR` is resolved exactly as documented in `plugins/ccx/commands/supervisor.md` → "State path resolver" and `docs/supervisor-design.md`. `STATE_DIR` is `$XDG_DATA_HOME/ccx/<repo-key>/` outside the working tree (overridable via `$CCX_DATA_HOME`). Plan resolves `STATE_DIR` at P0 (the resolver emits the one-line `ccx state: <STATE_DIR>` stderr announcement) and uses `STATE_DIR/BOARD.md` for every read / write below. The `git -C "$REPO_ROOT" …` anchoring rule applies to scope-glob grounding. BOARD is not under git tracking — plan `Write`s it directly with no `git add` / `git commit` step.
 
-This command is the `/ccx:supervisor` onboarding path (see §14 of `docs/supervisor-design.md`). Without it, the only route to a valid `BOARD.md` is hand-authoring YAML from the design doc — the onboarding cliff M6 closes.
+This command is the `/ccx:supervisor` onboarding path. Without it, the only route to a valid `BOARD.md` is hand-authoring YAML from the design doc — the onboarding cliff M6 closes.
 
 Raw arguments: `$ARGUMENTS`
 
@@ -37,13 +37,13 @@ No other flags for M6. Direction-only updates and row-editing are manual — the
 
 ## Guardrails
 
-- Plan MUST NOT push, force-push, amend, `git reset --hard`, or create branches — it only writes `BOARD.md` (and commits it on the current branch).
-- Plan MUST NOT write `STATE_DIR/tasks/*.md` brief files. The supervisor creates briefs at dispatch time (§6.1 of the design doc). If plan wrote briefs here, they would bypass the draft-review gate.
-- Plan MUST NOT set any task row to `status: pending` — every new row is `draft`. The `draft → pending` transition is the human's review act and is explicitly gated (see §14.3.3).
+- Plan MUST NOT push, force-push, amend, `git reset --hard`, create branches, stage, or commit — it only writes `STATE_DIR/BOARD.md`.
+- Plan MUST NOT write `STATE_DIR/tasks/*.md` brief files. The supervisor creates briefs at dispatch time. If plan wrote briefs here, they would bypass the draft-review gate.
+- Plan MUST NOT set any task row to `status: pending` — every new row is `draft`. The `draft → pending` transition is the human's review act.
 - `scope.include` globs MUST be **grounded on actual repo files**. For each proposed glob, run `git ls-files -z -- <glob>` and record the match count. If a glob matches zero files, that is allowed (the task may create new files) BUT the task's `notes` field MUST say so explicitly so the human catches hallucinated scopes on review. Ungrounded scopes cause the supervisor's M4 overlap gate to misfire at dispatch time — worse than no plan.
 - `scope.include` globs MUST pass the same contract enforced by `/ccx:supervisor` P1 step 2: non-empty strings, no NUL byte, no newline. Plan runs the pathspec sanity probe (`git ls-files -z -- <glob>`) on each glob to catch malformed pathspecs before the human ever sees them.
 - Plan MUST NOT modify any existing task row in `--append` mode — not even to normalize whitespace or re-order keys. The existing YAML block is edited by inserting new rows immediately before the closing fence; prior bytes are left alone.
-- Every emitted row MUST have a stable `id` of the form `^T-[0-9]+$`. IDs are monotonic from `max(existing) + 1` — never reused even if a prior row was removed, because brief filenames and branch names key off the id (§14.3.4).
+- Every emitted row MUST have a stable `id` of the form `^T-[0-9]+$`. IDs are monotonic from `max(existing) + 1` — never reused even if a prior row was removed, because brief filenames and branch names key off the id .
 - Task count is bounded: emit between **1 and 25** rows per invocation. Under 1 is a planning failure; over 25 is almost certainly under-decomposition noise rather than a real plan and should trigger a refusal with the offer to re-run on a narrower scope.
 
 ---
@@ -53,7 +53,7 @@ No other flags for M6. Direction-only updates and row-editing are manual — the
 1. Resolve repo root: `REPO_ROOT="$(git rev-parse --show-toplevel)"`. If not inside a git repo, STOP with `/ccx:plan must be run inside a git repository`.
 1a. **Resolve `STATE_DIR`** per `plugins/ccx/commands/supervisor.md` → "State path resolver" (SSOT). Compute `BOARD_PATH = STATE_DIR/BOARD.md` (absolute). Plan `Write`s and `Read`s `BOARD_PATH` directly — BOARD is not under git tracking, so there is no dirty-check, no `git add`, and no commit step.
 
-   **Repo-root anchoring (load-bearing for in-tree pathspecs).** From this step onward, every `git …` invocation that targets in-tree paths — most importantly the `git ls-files -z -- <glob>` scope-grounding probe (Phase 1 step 3) — MUST be anchored to `REPO_ROOT` via the `git -C "$REPO_ROOT" …` form. Bare `git …` without `-C` resolves pathspecs relative to the caller's current directory, which would mean `scope.include` globs are evaluated against a different set than the supervisor will see at dispatch (see its M4 overlap gate in supervisor.md §P2.4). The `-C "$REPO_ROOT"` prefix makes every in-tree-anchored command below behave as if invoked from the repo root regardless of where the user actually ran `/ccx:plan` from. The quoting matters: `"$REPO_ROOT"` may contain spaces on platforms where the repo is checked out under a path like `~/Client Projects/foo`. Always pass `BOARD_PATH` as an absolute path, never a bare `BOARD.md`.
+   **Repo-root anchoring (load-bearing for in-tree pathspecs).** From this step onward, every `git …` invocation that targets in-tree paths — most importantly the `git ls-files -z -- <glob>` scope-grounding probe (Phase 1 step 3) — MUST be anchored to `REPO_ROOT` via the `git -C "$REPO_ROOT" …` form. Bare `git …` without `-C` resolves pathspecs relative to the caller's current directory, which would mean `scope.include` globs are evaluated against a different set than the supervisor will see at dispatch. The `-C "$REPO_ROOT"` prefix makes every in-tree-anchored command below behave as if invoked from the repo root regardless of where the user actually ran `/ccx:plan` from. The quoting matters: `"$REPO_ROOT"` may contain spaces on platforms where the repo is checked out under a path like `~/Client Projects/foo`. Always pass `BOARD_PATH` as an absolute path, never a bare `BOARD.md`.
 3. Parse the arguments above into `INPUT_MODE ∈ {prompt, from}`, `APPEND ∈ {true, false}`, `INPUT_RAW` (the prompt string or the contents of `--from <path>`), and `INPUT_LABEL` (`"prompt"` or `"from <path>"`).
 4. `BOARD_PATH` is already resolved in step 1a. Apply the mode matrix above against `BOARD_PATH` (file existence check uses the absolute path). STOP on the error cases listed there.
 5. If `INPUT_MODE == "from"`:
@@ -108,7 +108,7 @@ invent direction content; absence is better than confabulation.}}
 ## Tasks
 
 ```yaml
-{{YAML array of PLANNED_TASKS rendered per §2c below, starting at id T-1}}
+{{YAML array of PLANNED_TASKS rendered per 2c below, starting at id T-1}}
 ```
 ```
 
@@ -123,7 +123,7 @@ Forward-reference resolution: `depends_on` entries recorded as positional forwar
 3. Locate the opening ` ```yaml ` fence on the line after `## Tasks` (allowing one blank line between) and the matching closing ` ``` ` fence. If either fence is missing, STOP with the same guidance as step 2 — append mode requires a well-formed fenced block (even an empty one). An **empty YAML block** is explicitly allowed and supported: it is a common intermediate state (a human seeds a direction-only `BOARD.md` by hand and then runs `/ccx:plan --append` to add the first tasks). "Empty" here means any of three shapes: (a) fences with only whitespace between them; (b) a literal `[]` body; (c) fences containing only YAML comments (lines starting with `#`).
 4. **Fast-path blank bodies before the YAML parse.** Extract the raw text between the opening and closing fences. Strip comments (any line whose first non-whitespace character is `#`). If the stripped result is only whitespace, OR is exactly `[]` (ignoring surrounding whitespace), OR would parse to YAML `null`, treat the block as `EXISTING_TASKS = []` and `EXISTING_IDS = []` directly — do NOT feed the raw text to a YAML parser in this case. A whitespace-only YAML document parses to `null`, not `[]`, so a naive "parse, then treat as array" pipeline would either crash on `null.forEach(...)` or wrongly reject the documented direction-only case. Only when the stripped body contains at least one non-comment, non-whitespace character (a `-` bullet or a `{`) do we proceed to an actual YAML parse. Extract `EXISTING_IDS = [T-<n> for each task with id matching ^T-[0-9]+$]`. Compute `MAX_ID_N = max(numeric suffix of each existing id, default 0)` — the `default 0` covers the empty-block fast-path so the first new task becomes `T-1`. The first newly-emitted task gets `id = T-<MAX_ID_N + 1>`, next is `T-<MAX_ID_N + 2>`, and so on — **never reuse an id even if it appears in `EXISTING_IDS` as a removed-but-still-referenced entry**, because brief filenames and branch names key off the id.
 5. Resolve forward-reference `depends_on` entries against the new ids (Phase 1 step 4 entries reference other planned tasks by position; `depends_on` may also legitimately reference an existing `EXISTING_IDS` entry if Phase 1 identified a dependency on already-seeded work — record those verbatim).
-6. **Render every new task** to a YAML text block per §2c below.
+6. **Render every new task** to a YAML text block per 2c below.
 7. **Use `Edit`** to insert the new YAML text immediately before the closing ` ``` ` fence, preserving the existing fence position and every existing task entry byte-for-byte. Do NOT re-write the entire block — an Edit-based insert is the only way to guarantee existing rows are untouched (Write-based full-file rewrite is forbidden in append mode).
    - **Non-empty block:** anchor the `Edit` on the last existing task's final line + the closing fence. If the existing block has trailing whitespace or unusual formatting that makes the anchor ambiguous, narrow the anchor until it is unique.
    - **Empty block** (literal `[]` body, or fences with only whitespace between them): anchor the `Edit` on the opening fence + the empty body + the closing fence as one contiguous region, and replace it with the opening fence + the new YAML rows + the closing fence. A literal `[]` body must be replaced by the new rows, not preserved — a YAML block can't validly contain both `[]` and task entries.
@@ -165,7 +165,7 @@ Rules:
 - `status: draft` — hardcoded. Never `pending`, never any other value.
 - `priority: normal` — hardcoded for M6. Humans adjust priority on review.
 - `depends_on: []` by default; populated with ids only when Phase 1 step 4 inferred a dependency.
-- `brief: tasks/T-<n>.md` — logical path relative to `STATE_DIR` (§6.1 of the design doc; M9 — see also §18). Supervisor never reads this field for path resolution — it derives `STATE_DIR/tasks/<id>.md` from the task id directly — so the field is a stable annotation, not a runtime lookup key. No brief file is created at plan time; supervisor creates it at dispatch.
+- `brief: tasks/T-<n>.md` — logical path relative to `STATE_DIR`. Supervisor never reads this field for path resolution — it derives `STATE_DIR/tasks/<id>.md` from the task id directly — so the field is a stable annotation, not a runtime lookup key. No brief file is created at plan time; supervisor creates it at dispatch.
 - `attempts: 0` and every `*_at` / `worker_pid` / `exit_status` / `worktree` / `branch` field are `null` / `0` as shown — supervisor-managed runtime state, placeholders only.
 - `notes:` — use the YAML literal block scalar (`notes: |`) for multi-line notes. Single-line notes can use the plain form (`notes: "..."`), but the block form is always safe.
 
@@ -225,4 +225,4 @@ This is the exit contract — plan does not run the supervisor, does not set any
 - The human's review action is literally editing `BOARD.md` and flipping `draft → pending`. That edit is a normal human commit; supervisor picks up the `pending` rows on its next run.
 - If `/ccx:supervisor` is invoked when no `BOARD.md` exists, it STOPs with a pointer back to this command (see supervisor.md Phase P0 step 4).
 
-The two commands have disjoint responsibilities: plan is LLM creativity (decomposition + scope grounding), supervisor is deterministic scheduling (dispatch + merge). Mixing them (a `/ccx:supervisor --plan` flag) was rejected in §14.2 of the design doc because it would degrade the supervisor's deterministic-parser property that M4/M5 rely on.
+The two commands have disjoint responsibilities: plan is LLM creativity (decomposition + scope grounding), supervisor is deterministic scheduling (dispatch + merge). Mixing them would degrade the supervisor's deterministic-parser property that M4/M5 rely on.

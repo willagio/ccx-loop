@@ -10,7 +10,7 @@ Inspection helper. The state directory lives outside the working tree by default
 
 ## What this does
 
-1. Runs the State path resolver from `plugins/ccx/commands/supervisor.md` (SSOT — see "State path resolver" section in that file, and `docs/supervisor-design.md` §18.1 for the algorithm; this helper inlines the same algorithm so it works without a running supervisor).
+1. Runs the State path resolver from `plugins/ccx/commands/supervisor.md` (SSOT — see "State path resolver" section in that file, and `docs/supervisor-design.md` for the algorithm; this helper inlines the same algorithm so it works without a running supervisor).
 2. Prints the resolved `STATE_DIR` to stdout, with a trailing `/`.
 3. Exits 0 on success, non-zero on any resolver failure (not inside a git repo).
 
@@ -94,4 +94,4 @@ printf '%s/\n' "${STATE_DIR%/}"
 
 - `/ccx:board` — opens `STATE_DIR/BOARD.md` in `$EDITOR` (falls back to `cat`).
 - `/ccx:tasks` — lists task briefs under `STATE_DIR/tasks/`.
-- `docs/supervisor-design.md` §18 — algorithm SSOT.
+- `docs/supervisor-design.md` — algorithm SSOT.

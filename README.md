@@ -10,8 +10,8 @@ The plugin ships four commands:
 |---------|----------|
 | `/ccx:loop`       | Run a fixed number of review-fix cycles (default 2). |
 | `/ccx:forever`    | Repeat review-fix cycles until Codex approves (safety cap default 100). |
-| `/ccx:plan`       | Seed (or extend with `--append`) `BOARD.md` task rows from a prompt or document — onboarding path for `/ccx:supervisor`. |
-| `/ccx:supervisor` | Dispatch N parallel `/ccx:loop` workers from a shared `BOARD.md` (dispatch + autonomous chat_ask + scope-overlap gate + pre-merge squash + automatic tier escalation across a 5-rung model ladder). |
+| `/ccx:plan`       | Seed (or extend with `--append`) the external `BOARD.md` task queue from a prompt or document — onboarding path for `/ccx:supervisor`. |
+| `/ccx:supervisor` | Dispatch N parallel Claude↔Codex duet workers from the external `BOARD.md` (autonomous chat_ask + scope-overlap gate + squash merge + automatic tier escalation). |
 
 ## Install
 
@@ -65,7 +65,7 @@ This installs `discord.js` + MCP SDK into the plugin, creates `~/.claude/ccx-cha
 | `--duet` | Duet mode: Claude and Codex alternate as implementer, each reviewing the other's last turn. Requires `--loops >= 2`. | off |
 | `--codex-first` | Flip the duet lead so Codex implements first. Only meaningful with `--duet`. | off |
 
-**Duet mode** (`--duet`). Replaces the default single-implementer Phase 2 with a four-turn alternation: `Claude implement → Codex review → Codex implement → Claude review → ...`. Convergence fires only when two consecutive review turns from **different** reviewers approve with no rejecting or non-empty-diff turn between them, so duet runs need at least 2 cycles (parse-time error otherwise). The Claude review side spawns a sub-Claude `Agent` that runs the user-installed `code-review` skill against the worker's current diff. See `docs/supervisor-design.md` §17 for the full state machine.
+**Duet mode** (`--duet`). Replaces the default single-implementer Phase 2 with a four-turn alternation: `Claude implement → Codex review → Codex implement → Claude review → ...`. Convergence fires only when two consecutive review turns from **different** reviewers approve with no rejecting or non-empty-diff turn between them, so duet runs need at least 2 cycles (parse-time error otherwise). The Claude review side spawns a sub-Claude `Agent` that runs the user-installed `code-review` skill against the worker's current diff. See `docs/supervisor-design.md` for the full state machine.
 
 ### `/ccx:forever` — loop until approval
 
@@ -86,7 +86,7 @@ This installs `discord.js` + MCP SDK into the plugin, creates `~/.claude/ccx-cha
 /ccx:plan <prompt> | --from <path> [--append]
 ```
 
-Takes a free-form prompt or a reference to a document the user already wrote (PRD, design note, ticket export), grounds `scope.include` globs on actual repo files, and writes task rows to `BOARD.md` as `status: draft`. The human reviews the draft, flips `draft → pending`, commits, and then runs `/ccx:supervisor`. This is the onboarding path for the supervisor — no need to learn the BOARD YAML schema by hand.
+Takes a free-form prompt or a reference to a document the user already wrote (PRD, design note, ticket export), grounds `scope.include` globs on actual repo files, and writes task rows to `STATE_DIR/BOARD.md` as `status: draft`. The human reviews the draft, flips `draft → pending`, and then runs `/ccx:supervisor`. This is the onboarding path for the supervisor — no need to learn the BOARD YAML schema by hand.
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -99,14 +99,14 @@ Takes a free-form prompt or a reference to a document the user already wrote (PR
 /ccx:supervisor [--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-loops N] [--max-attempts N] [--start-tier <alias>] [--chat] [--dry-run]
 ```
 
-Drives N parallel `/ccx:loop` workers from a shared `BOARD.md` at the repo root. Each task gets its own worktree, brief file (`.ccx/tasks/T-<id>.md`), and a squash merge commit on approval. Worker `chat_ask` calls are intercepted by the broker and answered autonomously from the brief / BOARD direction / merge history when possible; ambiguous asks escalate to Discord. When a worker exits without approval, the supervisor re-dispatches the task automatically along a fixed 5-rung model ladder — `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)` — bumping one rung on `stuck` exits and retrying the same rung on `cycle-cap`, until the task merges or the `--max-attempts` budget runs out. A `stuck` exit at the top rung (`opus/max`) is the only remaining human gate.
+Drives N parallel `/ccx:loop --duet` workers from `STATE_DIR/BOARD.md`, outside the repo working tree. Each task gets an external worktree under `STATE_DIR/worktrees/`, a brief file under `STATE_DIR/tasks/`, and one squash merge commit on approval. Worker `chat_ask` calls are intercepted by the broker and answered autonomously from the brief / BOARD direction / merge history when possible; ambiguous asks escalate to Discord. When a worker exits without approval, the supervisor re-dispatches the task automatically along a fixed 5-rung model ladder — `haiku(medium) → sonnet(medium) → opus(high) → opus(xhigh) → opus(max)` — bumping one rung on `stuck` exits and retrying the same rung on `cycle-cap`, until the task merges or the `--max-attempts` budget runs out. A `stuck` exit at the top rung (`opus/max`) is the only remaining human gate.
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--parallel N` | Max concurrent workers (1–10) | 3 |
 | `--integration BRANCH` | Branch merges land on | current branch |
 | `--max-tasks M` | Stop after M merges | unlimited |
-| `--worker-loops N` | `--loops N` passed to each worker (1–20) | 3 |
+| `--worker-loops N` | `--loops N` passed to each duet worker (2–20) | 3 |
 | `--max-attempts N` | Max automatic worker dispatches per task (tier bumps + same-tier retries). Exempt branch: `opus/max` stuck → human prompt. | 4 |
 | `--start-tier <alias>` | First-attempt rung on the 5-rung ladder: `haiku \| sonnet \| opus \| opus-xhigh \| opus-max` | `sonnet` |
 | `--chat` | Register a supervisor session with the ccx-chat broker and post lifecycle events (dispatch, merge, block, stuck prompt, run end) to Discord | off |
@@ -130,11 +130,11 @@ Motion on the ladder is driven by the worker's exit:
 
 `--start-tier` chooses the first rung; lower rungs are unreachable for that run. The default `--max-attempts 4` exactly covers a pure stuck climb from `sonnet` → `opus/high` → `opus/xhigh` → `opus/max`, so the top-rung human prompt is reachable without raising the budget. `--start-tier haiku` needs at least `--max-attempts 5` to walk all five rungs on stuck exits.
 
-**Duet mode for supervisor tasks.** There is no `--duet` supervisor flag — the choice is per-task, declared in the brief frontmatter at `.ccx/tasks/T-<id>.md`. Add `loop_flags: ["--duet"]` (and optionally `"--codex-first"`) to the brief YAML; the supervisor preserves the field across regenerations and re-dispatches and forwards the listed flags verbatim to each `/ccx:loop` spawn. Only `--duet` and `--codex-first` are on the allowlist; anything else blocks the task as `loop-flags-rejected`. Requires `--worker-loops >= 2` (the duet convergence rule needs at least two review turns).
+**Supervisor duet.** There is no `--duet` supervisor flag because supervisor workers always run in duet mode. The worker spawn is `/ccx:loop --duet --loops <N> --commit --chat`; `--worker-loops` therefore starts at 2 because duet convergence needs two reviewer turns.
 
-**M8a infra notes.** Worker exit detection now reads `claude agents --json` (matched by `cwd == meta.worktree_path`) instead of `BashOutput`-on-`shell_id` polling, and Phase P0 best-effort fast-forwards your local integration branch to `origin/<INTEGRATION>` so each worker worktree forks from a fresh upstream base. Both have documented fallbacks (legacy `BashOutput`, local HEAD) so older Claude Code versions and purely-local repos degrade cleanly.
+**M8a infra notes.** Worker exit detection reads `claude agents --json` (matched by `cwd == meta.worktree_path`), and Phase P0 best-effort fast-forwards your local integration branch to `origin/<INTEGRATION>` so each worker worktree forks from a fresh upstream base. If there is no remote, the supervisor uses local HEAD.
 
-Milestones shipped: M1 dispatch + naive merge, M2 broker supervisor adapter, M3 autonomous chat_ask answering, M4 scope-overlap gate + pre-merge dry-run, M5 stuck-exit auto-revise + re-dispatch, M6 `/ccx:plan` onboarding (separate command above), M7 automatic model tier escalation, M8a `claude agents --json` exit detection + fresh-upstream worker base, M8b per-brief duet passthrough. See `docs/supervisor-design.md` for the full design.
+Milestones shipped: M1 dispatch + naive merge, M2 broker supervisor adapter, M3 autonomous chat_ask answering, M4 scope-overlap gate + pre-merge dry-run, M5 stuck-exit auto-revise + re-dispatch, M6 `/ccx:plan` onboarding (separate command above), M7 automatic model tier escalation, M8a `claude agents --json` exit detection + fresh-upstream worker base, M8b supervisor duet workers. See `docs/supervisor-design.md` for the full design.
 
 ### Examples
 
@@ -202,23 +202,7 @@ Three inspection commands surface the path and contents:
 - `/ccx:board` — opens `STATE_DIR/BOARD.md` in `$EDITOR` (falls back to `cat`).
 - `/ccx:tasks` — lists task briefs under `STATE_DIR/tasks/`, with `--status` filter.
 
-Worker worktrees go under `STATE_DIR/worktrees/T-X/` (also outside your tree). Approved worker branches merge via `git merge --squash` by default into a single mainline commit; the worker's commit message is rewritten to match your repo's recent-history style before the squash lands. Worker branches and worktrees are cleaned up after merge — no `ccx/T-X` ref survives.
-
-### Migrating from an older ccx install
-
-If you have a `.ccx/` directory in your working tree from a pre-relocation install:
-
-```bash
-DEST="$(claude -p '/ccx:where' | tail -1)"
-mkdir -p "$DEST"
-mv .ccx/* "$DEST/"
-rmdir .ccx
-# If .ccx/ was committed:
-git rm -r --cached .ccx/
-git commit -m "remove vestigial state directory"
-```
-
-Once `.ccx/` is gone from the worktree, the next `/ccx:supervisor` run reads from `$DEST` automatically.
+Worker worktrees go under `STATE_DIR/worktrees/T-X/` (also outside your tree). Approved worker branches merge via `git merge --squash` into a single mainline commit; the worker's commit message is rewritten to match your repo's recent-history style before the squash lands. Worker branches and worktrees are cleaned up after merge — no `duet/T-X` ref survives.
 
 ## License
 

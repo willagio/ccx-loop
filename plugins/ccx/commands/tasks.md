@@ -107,8 +107,8 @@ BOARD_PATH="${STATE_DIR%/}/BOARD.md"
 # tasks/ directory is consulted only to surface the "brief file exists?"
 # signal alongside each row.
 # Parse the BOARD '## Tasks' YAML block once when the file is present.
-# When BOARD.md is missing (deleted, not migrated from pre-M9, or never
-# seeded), do NOT early-exit — the orphan-brief scan below still has
+# When BOARD.md is missing or never seeded, do NOT early-exit — the
+# orphan-brief scan below still has
 # something useful to surface in that case, and hiding it would defeat
 # the helper's drift-inspection purpose. BOARD_ROWS stays empty; the
 # all-empty check after orphan collection prints the canonical
@@ -279,14 +279,11 @@ The `FILTER_STATUS` placeholder at the top of the bash block above is filled by 
 
 ```
 $ /ccx:tasks
- T-1  merged      M9: external state directory — relocate .ccx/ to $XDG_DATA_HOME/ccx/<key>/
- T-2  merged      M9: external worktrees — git worktree add under $STATE/worktrees/
- T-3  merged      M9: commit message hygiene — style mirror + marker strip
- T-4  merged      M9: merge strategy — squash default + branch cleanup
- T-5  assigned    M9: inspection helpers
-*T-6  pending     M9: ccx verify (zero-footprint gate) + customer-mode README section
+ T-1  merged      Add OAuth2 login flow
+ T-2  assigned    Refactor session storage
+*T-3  pending     Add audit log retention
 
-6 task(s) listed
+3 task(s) listed
 (rows marked "*" have no brief file yet — supervisor creates briefs at dispatch time)
 ```
 
@@ -294,7 +291,7 @@ The leading column is the brief-file marker: a space means the supervisor has di
 
 ```
 $ /ccx:tasks --status pending
-*T-6  pending     M9: ccx verify (zero-footprint gate) + customer-mode README section
+*T-3  pending     Add audit log retention
 
 1 task(s) listed (filter: status=pending)
 (rows marked "*" have no brief file yet — supervisor creates briefs at dispatch time)
@@ -326,4 +323,4 @@ $ /ccx:tasks --status ORPHAN
 
 - `/ccx:where` — print the resolved `STATE_DIR` (one line, no enumeration).
 - `/ccx:board` — open `BOARD.md` in `$EDITOR` to edit a task row's status, scope, or notes.
-- `docs/supervisor-design.md` §6.1 — brief file schema (the fields surfaced here).
+- `docs/supervisor-design.md` — brief file schema (the fields surfaced here).

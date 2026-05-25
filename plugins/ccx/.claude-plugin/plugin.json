@@ -1,7 +1,7 @@
 {
   "name": "ccx",
   "version": "0.4.0",
-  "description": "Automated dev loops with Codex review gates. Provides /ccx:loop (with --duet mode for Claude↔Codex alternating implementer turns), /ccx:forever, /ccx:supervisor (parallel worker orchestrator using `claude agents --json` for worker exit detection, with autonomous chat_ask answering, scope-overlap gating, stuck-exit auto-revise, and model tier escalation — 5-rung ladder haiku→sonnet→opus→opus-xhigh→opus-max driven by --max-attempts / --worker-loops / --start-tier), /ccx:plan (seeds BOARD.md task rows from a prompt or document), and an optional Discord chat bridge (/ccx:chat-setup + --chat).",
+  "description": "Automated dev loops with Codex review gates. Provides /ccx:loop (with --duet mode for Claude↔Codex alternating implementer turns), /ccx:forever, /ccx:supervisor (parallel Claude↔Codex duet orchestrator using `claude agents --json` for worker exit detection, with autonomous chat_ask answering, scope-overlap gating, stuck-exit auto-revise, and model tier escalation — 5-rung ladder haiku→sonnet→opus→opus-xhigh→opus-max driven by --max-attempts / --worker-loops / --start-tier), /ccx:plan (seeds BOARD.md task rows from a prompt or document), and an optional Discord chat bridge (/ccx:chat-setup + --chat).",
   "author": {
     "name": "Will Kang"
   },

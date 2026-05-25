@@ -100,4 +100,4 @@ fi
 - `/ccx:where` — print the resolved `STATE_DIR` (one line, no file open).
 - `/ccx:tasks` — list task briefs under `STATE_DIR/tasks/`.
 - `/ccx:plan` — seeds `BOARD.md` at the resolved path. Run this first if `/ccx:board` reports the file missing.
-- `docs/supervisor-design.md` §18 — where the BOARD lives.
+- `docs/supervisor-design.md` — where the BOARD lives.
