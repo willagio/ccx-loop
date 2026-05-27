@@ -15,7 +15,7 @@ Raw arguments: `$ARGUMENTS`
 ## Argument Parsing
 
 Parse the raw arguments:
-- `--loops N` — fixed number of review-fix cycles (default: 2; clamped to 1–20).
+- `--loops N` — fixed number of review-fix cycles (default: 2; clamped to 1–100).
 - `--min-severity LEVEL` — ignore findings below this severity. One of `critical|high|medium|low`. Default: `low` (fix everything). Ranking: `critical > high > medium > low`; `--min-severity medium` means fix critical/high/medium, skip low.
 - `--min-confidence N` — ignore findings whose `confidence` is below `N` (0.0–1.0). Default: `0.0`.
 - `--commit` — auto-commit without asking (skip the prompt), subject to the Phase 4 auto-commit gate.
