@@ -128,6 +128,104 @@ There is no merge-strategy config, rebase path, or merge-commit-producing path.
 
 After a merged exit, the supervisor removes the worktree first and then deletes `duet/<task_id>`. Blocked exits remove the worktree but preserve the branch for inspection.
 
+## Conductor Mode (M10 — proposed)
+
+Status: proposed (design under review; not yet implemented).
+
+### Motivation
+
+The shipped duet contract (M8b) runs both alternating implementers inside a single `claude -p` worker session. Claude implement turns execute in-session; Codex implement turns shell out to `codex-companion.mjs task`. Two consequences:
+
+1. **Context accumulation.** Over many cycles the worker's Claude session collects every Read/Edit/Bash result, every Codex JSON envelope, and every worktree snapshot. Claude review uses a sub-Agent (whose context is isolated), but every other path lands in the main session. Long runs trip Claude Code's lossy auto-compaction; Codex output payloads are the largest per-turn additions.
+2. **Claude tier locked at spawn.** Codex can advance through the ladder per cycle via `--model`; Claude cannot, because changing Claude's model mid-run requires a sub-Claude subprocess per turn, which M8b explicitly defers.
+
+### Architecture
+
+In conductor mode the worker `claude -p` becomes a **conductor** rather than an implementer. The conductor:
+
+- Holds the run-wide context: brief excerpt, latest review verdict, short cycle log, ladder, and its own audit decisions.
+- Spawns either `claude -p` or `codex` as the per-turn implementer or reviewer; collects each sub-process's artifact (worktree diff + bounded self-report) and the verdict.
+- Makes the per-turn decisions that M8b hardcoded: which side implements next, which side reviews next, which tier each side runs at.
+
+The conductor itself never edits source files. Edits are observed by the same temp-index snapshot algorithm M8b's duet driver already uses for empty-diff detection.
+
+### Per-turn I/O contract
+
+To each sub-implementer:
+
+- The verbatim style-ping-pong-mitigation clause from M8b.
+- Brief excerpt.
+- When the previous outcome was reject: the previous review's verdict + findings, free-form. When it was approve: the "previous review approved; return without edits unless substantive" instruction.
+- Working directory = worktree path.
+
+From each sub-process (the only structured part of the contract):
+
+- Final line MUST be `VERDICT: approve` or `VERDICT: reject` for review turns. This single-line protocol is the only convergence signal the conductor parses.
+- Bounded self-report (≤ 200 words) summarizing the turn. Free-form; the conductor reads it as context, does not parse.
+- Worktree diff is observed by the conductor independently via snapshot before/after — the sub-process does not need to describe it.
+
+Codex's existing `codex-companion.mjs review --json` envelope is consumed as-is (its `verdict` field maps to the same approve/reject signal). The conductor accepts either the JSON envelope or the single-line protocol from any sub-side.
+
+### Adaptive tier policy
+
+Tier selection is LLM judgment, not a cycle counter. Default policy, guided by prompt and overridable via `STATE_DIR/tier-policy.md` when present:
+
+- Start at BOARD `model_start` (or `--start-tier`).
+- Reject judged substantive/architectural → tier index +1.
+- Reject judged trivial/nit → tier index unchanged or -1.
+- Two consecutive same-shape rejects → tier index +1.
+- Stuck judgment fires → tier index +1 capped at max; conductor may also flip the implementer side.
+- Trivial passing diff (e.g. ≤ 5-line approve) → next implement turn may use tier index -1 for token economy.
+
+Tier escalation is no longer monotonic; the conductor may move both directions within the active ladder. Claude and Codex tiers move independently.
+
+### Convergence and stuck detection
+
+The M8b convergence contract is preserved: a run converges only when two consecutive approval-like outcomes come from **different reviewers**. The conductor enforces this by tracking which side produced each approval and rejecting a same-side double-approve.
+
+Stuck detection moves from `(file, title, body)` tuple equality to a conductor-side LLM judgment over the last N review verdicts. The shared `findingStreak` map is no longer load-bearing. Default N = 3, matching M8b's threshold. The conductor must be conservative — false positives end runs prematurely.
+
+The `M8B_STUCK_SIDE` worker-log token continues to be emitted before `chat_close({status: "stuck"})` so the supervisor's existing log-tail classifier keeps working unchanged.
+
+### Companion script
+
+`plugins/ccx/scripts/claude-companion.mjs` mirrors `codex-companion.mjs`. Responsibilities:
+
+- Resolve the `claude` CLI path; fail with the same install-hint shape Codex uses if missing.
+- Spawn `claude -p` with the conductor-chosen `--model` and (when set on the resolved tier) `--effort`, an explicit `--allowedTools` set (Read, Write, Edit, Bash, Glob, Grep), and `--permission-mode acceptEdits`. Worktree-isolation constrains blast radius to the task's worktree.
+- Capture stdout/stderr until exit; extract the trailing `VERDICT:` line; return `{verdict, body, exit_code}` to the conductor.
+
+The companion does NOT parse the free-form body. The conductor reads it as context.
+
+### Backward compatibility
+
+A new flag `/ccx:loop --conductor` enables conductor mode. `/ccx:loop --duet` keeps its M8b semantics during incubation; the two flags are mutually exclusive. Argument-parse rejects `--conductor --duet` with `--conductor and --duet are mutually exclusive`.
+
+`/ccx:supervisor` gains `--worker-mode duet|conductor` (default: `duet` during M10 incubation; flips to `conductor` once stable). Optional per-task override via a new BOARD `worker_mode` field.
+
+The M8b in-session driver remains as a fallback path for users who prefer fewer subprocesses or whose `claude -p` invocation is constrained.
+
+### Conductor audit trail
+
+Each conductor decision (tier choice, side choice, stuck judgment, exit) is appended as JSONL to `STATE_DIR/workers/<task_id>.conductor.jsonl` so the human can audit after-the-fact. Schema mirrors `STATE_DIR/supervisor-audit/<RUN_ID>.jsonl`. One file per worker, written by the conductor itself.
+
+### Open questions
+
+1. **Permission inheritance.** Does the sub-`claude -p` correctly receive `--permission-mode acceptEdits` and `--allowedTools` for the conductor's intended toolset? PoC must verify before locking the contract.
+2. **Plugin/skill resolution in sub-process.** Sub-`claude -p` reloads `~/.claude/plugins/`; verify the active `code-review` skill resolves identically (so Claude review still has access to it).
+3. **Cost crossover.** Many short subprocess invocations vs one long in-session — measure the cycle count beyond which conductor mode wins on tokens. Expected to land between cycle 10 and 20.
+4. **Stuck judgment false positives.** LLM "is this the same complaint as last cycle" may end runs early. Default conservatively (require high confidence; fall back to tuple-equality when uncertain).
+5. **`--loops N` unit under conductor.** Keep "1 implement + 1 review = 1 cycle" (M8b semantics) or switch to total sub-spawn count? M8b semantics chosen by default; revisit after PoC.
+6. **Per-cycle Codex effort.** `codex-companion.mjs` currently accepts `--model` only. Investigate whether newer Codex CLIs expose an effort flag the companion can forward.
+7. **Conductor self-eviction.** If the conductor's own context grows large despite delegation, define a fallback: hand off audit log + state to a successor `claude -p` and exit. Probably out of scope for M10; flagged for M11.
+
+### Non-goals for M10
+
+- Replacing the supervisor with the conductor model (the supervisor's parallel-worker role is unchanged).
+- Concurrent sub-implementer execution within one worker (turns remain serial within one task).
+- Cross-worker tier policy sharing (each conductor decides independently).
+- Migration of in-flight M8b runs to conductor mode (the modes coexist; new runs choose at start).
+
 ## Non-Goals
 
 - Distributed execution across machines.
