@@ -128,9 +128,9 @@ There is no merge-strategy config, rebase path, or merge-commit-producing path.
 
 After a merged exit, the supervisor removes the worktree first and then deletes `duet/<task_id>`. Blocked exits remove the worktree but preserve the branch for inspection.
 
-## Conductor Mode (M10 — proposed)
+## Conductor Mode (M10)
 
-Status: proposed (design under review; not yet implemented).
+Status: shipped. Opt-in via `--conductor` / `--worker-mode conductor`; duet remains the supervisor default during M10 incubation.
 
 ### Motivation
 
@@ -211,13 +211,10 @@ Each conductor decision (tier choice, side choice, stuck judgment, exit) is appe
 
 ### Open questions
 
-1. **Permission inheritance.** Does the sub-`claude -p` correctly receive `--permission-mode acceptEdits` and `--allowedTools` for the conductor's intended toolset? PoC must verify before locking the contract.
-2. **Plugin/skill resolution in sub-process.** Sub-`claude -p` reloads `~/.claude/plugins/`; verify the active `code-review` skill resolves identically (so Claude review still has access to it).
-3. **Cost crossover.** Many short subprocess invocations vs one long in-session — measure the cycle count beyond which conductor mode wins on tokens. Expected to land between cycle 10 and 20.
-4. **Stuck judgment false positives.** LLM "is this the same complaint as last cycle" may end runs early. Default conservatively (require high confidence; fall back to tuple-equality when uncertain).
-5. **`--loops N` unit under conductor.** Keep "1 implement + 1 review = 1 cycle" (M8b semantics) or switch to total sub-spawn count? M8b semantics chosen by default; revisit after PoC.
-6. **Per-cycle Codex effort.** `codex-companion.mjs` currently accepts `--model` only. Investigate whether newer Codex CLIs expose an effort flag the companion can forward.
-7. **Conductor self-eviction.** If the conductor's own context grows large despite delegation, define a fallback: hand off audit log + state to a successor `claude -p` and exit. Probably out of scope for M10; flagged for M11.
+1. **Cost crossover.** Many short subprocess invocations vs one long in-session — measure the cycle count beyond which conductor mode wins on tokens. Expected to land between cycle 10 and 20.
+2. **Stuck judgment false positives.** LLM "is this the same complaint as last cycle" may end runs early. Default conservatively (require high confidence; fall back to tuple-equality when uncertain).
+3. **Per-cycle Codex effort.** `codex-companion.mjs` currently accepts `--model` only. Investigate whether newer Codex CLIs expose an effort flag the companion can forward.
+4. **Conductor self-eviction.** If the conductor's own context grows large despite delegation, define a fallback: hand off audit log + state to a successor `claude -p` and exit. Probably out of scope for M10; flagged for M11.
 
 ### Non-goals for M10
 

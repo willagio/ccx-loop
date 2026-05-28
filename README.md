@@ -53,7 +53,7 @@ This installs `discord.js` + MCP SDK into the plugin, creates `~/.claude/ccx-cha
 ### `/ccx:loop` — fixed N cycles
 
 ```
-/ccx:loop [--loops N] [--min-severity LEVEL] [--min-confidence N] [--commit] [--duet] [--codex-first] <task>
+/ccx:loop [--loops N] [--min-severity LEVEL] [--min-confidence N] [--commit] [--duet] [--codex-first] [--conductor] <task>
 ```
 
 | Flag | Description | Default |
@@ -63,7 +63,8 @@ This installs `discord.js` + MCP SDK into the plugin, creates `~/.claude/ccx-cha
 | `--min-confidence N` | Ignore findings with confidence < N (0.0–1.0) | `0.0` |
 | `--commit` | Auto-commit on clean exit (gated) | off |
 | `--duet` | Duet mode: Claude and Codex alternate as implementer, each reviewing the other's last turn. Requires `--loops >= 2`. | off |
-| `--codex-first` | Flip the duet lead so Codex implements first. Only meaningful with `--duet`. | off |
+| `--codex-first` | Flip the multi-implementer lead so Codex implements first. Meaningful with `--duet` or `--conductor`. | off |
+| `--conductor` | Conductor mode: each implement/review turn runs as a fresh `claude -p` or `codex` sub-process. Mutually exclusive with `--duet`. | off |
 
 **Duet mode** (`--duet`). Replaces the default single-implementer Phase 2 with a four-turn alternation: `Claude implement → Codex review → Codex implement → Claude review → ...`. Convergence fires only when two consecutive review turns from **different** reviewers approve with no rejecting or non-empty-diff turn between them, so duet runs need at least 2 cycles (parse-time error otherwise). The Claude review side spawns a sub-Claude `Agent` that runs the user-installed `code-review` skill against the worker's current diff. See `docs/supervisor-design.md` for the full state machine.
 
@@ -96,17 +97,18 @@ Takes a free-form prompt or a reference to a document the user already wrote (PR
 ### `/ccx:supervisor` — parallel orchestrator
 
 ```
-/ccx:supervisor [--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-loops N] [--start-tier auto|economy|default|strong|max] [--chat] [--dry-run]
+/ccx:supervisor [--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-loops N] [--worker-mode duet|conductor] [--start-tier auto|economy|default|strong|max] [--chat] [--dry-run]
 ```
 
-Drives N parallel `/ccx:loop --duet` workers from `STATE_DIR/BOARD.md`, outside the repo working tree. Each task gets an external worktree under `STATE_DIR/worktrees/`, a brief file under `STATE_DIR/tasks/`, and one squash merge commit on approval. Worker `chat_ask` calls are intercepted by the broker and answered autonomously from the brief / BOARD direction / merge history when possible; ambiguous asks escalate to Discord. The supervisor prints the active model ladder before dispatch and passes the selected start tier to each duet worker. Claude runs at that start tier for the worker's lifetime; Codex can advance through the ladder by duet cycle via `--model`.
+Drives N parallel workers from `STATE_DIR/BOARD.md`, outside the repo working tree. Each task gets an external worktree under `STATE_DIR/worktrees/`, a brief file under `STATE_DIR/tasks/`, and one squash merge commit on approval. Worker `chat_ask` calls are intercepted by the broker and answered autonomously from the brief / BOARD direction / merge history when possible; ambiguous asks escalate to Discord. The supervisor prints the active model ladder before dispatch and passes the selected start tier to each worker. Workers default to duet mode (`--worker-mode duet`) or conductor mode (`--worker-mode conductor`); Codex advances through the ladder per cycle via `--model`.
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--parallel N` | Max concurrent workers (1–10) | 3 |
 | `--integration BRANCH` | Branch merges land on | current branch |
 | `--max-tasks M` | Stop after M merges | unlimited |
-| `--worker-loops N` | `--loops N` passed to each duet worker (2–20) | 3 |
+| `--worker-loops N` | `--loops N` passed to each worker (2–20) | 3 |
+| `--worker-mode <duet\|conductor>` | Worker mode forwarded to each dispatched worker. `duet` (default) or `conductor` (runs each implement/review turn as a fresh sub-process). | `duet` |
 | `--start-tier <alias>` | Override every task's starting rung: `auto \| economy \| default \| strong \| max`. `auto` uses each row's `model_start`. | `auto` |
 | `--chat` | Register a supervisor session with the ccx-chat broker and post lifecycle events (dispatch, merge, block, stuck prompt, run end) to Discord | off |
 | `--dry-run` | Print dispatch plan, don't commit or spawn | off |
@@ -139,11 +141,22 @@ Custom ladder file:
 
 The supervisor rejects duplicate aliases, missing `claude.model`, missing `codex.model`, or a `default_start` that is not present in `tiers`. `model_start` values in BOARD must reference an active alias; this keeps task rows readable while letting the operator remap aliases to newer model IDs later without editing every task.
 
-**Supervisor duet.** There is no `--duet` supervisor flag because supervisor workers always run in duet mode. The worker spawn is `/ccx:loop --duet --loops <N> --commit --chat`; `--worker-loops` therefore starts at 2 because duet convergence needs two reviewer turns.
+**Supervisor worker mode.** Supervisor workers default to duet mode; pass `--worker-mode conductor` to opt the whole run into conductor mode instead (see Conductor Mode above). The default worker spawn is `/ccx:loop --duet --loops <N> --commit --chat`; `--worker-loops` therefore starts at 2 because duet convergence needs two reviewer turns.
 
 **M8a infra notes.** Worker exit detection reads `claude agents --json` (matched by `cwd == meta.worktree_path`), and Phase P0 best-effort fast-forwards your local integration branch to `origin/<INTEGRATION>` so each worker worktree forks from a fresh upstream base. If there is no remote, the supervisor uses local HEAD.
 
 Milestones shipped: M1 dispatch + naive merge, M2 broker supervisor adapter, M3 autonomous chat_ask answering, M4 scope-overlap gate + pre-merge dry-run, M6 `/ccx:plan` onboarding (separate command above), M8a `claude agents --json` exit detection + fresh-upstream worker base, M8b supervisor duet workers, visible/customizable duet model ladder. See `docs/supervisor-design.md` for the full design.
+
+### Conductor Mode
+
+Conductor mode (`--conductor` on `/ccx:loop`, `--worker-mode conductor` on `/ccx:supervisor`) runs each implement and review turn as a fresh `claude -p` or `codex` sub-process instead of accumulating everything in one long worker session. This bounds context growth across cycles and lets Claude's model tier advance per cycle (not just Codex's).
+
+```
+/ccx:loop --conductor --loops 5 --commit "Refactor request parser"
+/ccx:supervisor --worker-mode conductor
+```
+
+Pick conductor over duet when worker context accumulation is a concern — typically `--worker-loops` above 10 or tasks that involve multi-file refactors. Duet remains the M10-incubation default; the two modes coexist and are mutually exclusive per invocation. See `docs/supervisor-design.md` §Conductor Mode (M10) for the full contract.
 
 ### Examples
 
