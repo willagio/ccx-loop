@@ -90,7 +90,9 @@ The single biggest failure mode is hallucinated scopes — decomposing a task in
    - `strong` — cross-file logic, ambiguous behavior, data migrations, concurrency, security-sensitive changes.
    - `max` — architecture-heavy work, high-risk refactors, or tasks where the input itself says prior attempts failed.
 
-Output of this phase: an in-memory list `PLANNED_TASKS` with fields `{ title, scope_include (grounded globs + match counts), depends_on (forward-references by position), model_start, notes (≤500 chars, explicit about zero-match globs and new-file creation) }`.
+   `model_start` and `worker_mode` are independent axes — a task can be `model_start: economy` + `worker_mode: conductor` if the work is mechanically simple but expected to accumulate enough context turns that the duet budget would be exceeded. Assign `worker_mode: conductor` only when you have affirmative reason to expect it; leave `null` (inherit the supervisor's run-level default) for the common case.
+
+Output of this phase: an in-memory list `PLANNED_TASKS` with fields `{ title, scope_include (grounded globs + match counts), depends_on (forward-references by position), model_start, worker_mode, notes (≤500 chars, explicit about zero-match globs and new-file creation) }`.
 
 ---
 
@@ -151,6 +153,7 @@ Every emitted row MUST match this shape exactly:
   status: draft
   priority: normal
   model_start: <active ladder alias>
+  worker_mode: null
   depends_on: []
   brief: tasks/T-<n>.md
   attempts: 0
@@ -172,6 +175,7 @@ Rules:
 - `status: draft` — hardcoded. Never `pending`, never any other value.
 - `priority: normal` — hardcoded for M6. Humans adjust priority on review.
 - `model_start` — one active ladder alias. The planner chooses this alias from the task shape; humans may edit it before flipping the row to `pending`. Do NOT emit raw model ids here. The supervisor maps aliases through its active ladder (`STATE_DIR/model-ladder.json` override or built-in default), so aliases stay readable even when model ids change later.
+- `worker_mode` — planner-set field; emit `null` for most tasks. Allowed values: `null` (inherit the supervisor's `--worker-mode` at dispatch), `duet` (M8b in-session alternation), or `conductor` (M10 sub-process delegation). The template shows `null` as the common-case default; the planner SHOULD emit `conductor` only when it has affirmative reason to expect the task will exceed the duet context budget (long-spec writing, multi-file refactors, or tasks the user explicitly flagged as long-running). Humans may also edit this field before flipping the row to `pending`.
 - `depends_on: []` by default; populated with ids only when Phase 1 step 4 inferred a dependency.
 - `brief: tasks/T-<n>.md` — logical path relative to `STATE_DIR`. Supervisor never reads this field for path resolution — it derives `STATE_DIR/tasks/<id>.md` from the task id directly — so the field is a stable annotation, not a runtime lookup key. No brief file is created at plan time; supervisor creates it at dispatch.
 - `attempts: 0` and every `*_at` / `worker_pid` / `exit_status` / `worktree` / `branch` field are `null` / `0` as shown — supervisor-managed runtime state, placeholders only.
