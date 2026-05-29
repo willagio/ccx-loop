@@ -58,7 +58,7 @@ This installs `discord.js` + MCP SDK into the plugin, creates `~/.claude/ccx-cha
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--loops N` | Number of review-fix cycles (1–20) | 2 |
+| `--loops N` | Number of review-fix cycles (1–100) | 2 |
 | `--min-severity LEVEL` | Ignore findings below `critical\|high\|medium\|low` | `low` (fix all) |
 | `--min-confidence N` | Ignore findings with confidence < N (0.0–1.0) | `0.0` |
 | `--commit` | Auto-commit on clean exit (gated) | off |
@@ -107,7 +107,7 @@ Drives N parallel workers from `STATE_DIR/BOARD.md`, outside the repo working tr
 | `--parallel N` | Max concurrent workers (1–10) | 3 |
 | `--integration BRANCH` | Branch merges land on | current branch |
 | `--max-tasks M` | Stop after M merges | unlimited |
-| `--worker-loops N` | `--loops N` passed to each worker (2–20) | 3 |
+| `--worker-loops N` | `--loops N` passed to each worker (2–100) | 3 |
 | `--worker-mode <duet\|conductor>` | Worker mode forwarded to each dispatched worker. `duet` (default) or `conductor` (runs each implement/review turn as a fresh sub-process). | `duet` |
 | `--start-tier <alias>` | Override every task's starting rung: `auto \| economy \| default \| strong \| max`. `auto` uses each row's `model_start`. | `auto` |
 | `--chat` | Register a supervisor session with the ccx-chat broker and post lifecycle events (dispatch, merge, block, stuck prompt, run end) to Discord | off |
