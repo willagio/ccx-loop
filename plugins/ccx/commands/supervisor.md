@@ -179,10 +179,10 @@ There is no merge-strategy config, no rebase path, and no merge-commit-producing
    {
      "default_start": "default",
      "tiers": [
-       { "alias": "economy", "claude": { "model": "sonnet", "effort": "medium" }, "codex": { "model": "gpt-5.5" } },
-       { "alias": "default", "claude": { "model": "sonnet", "effort": "high" }, "codex": { "model": "gpt-5.5" } },
-       { "alias": "strong", "claude": { "model": "opus", "effort": "high" }, "codex": { "model": "gpt-5.5" } },
-       { "alias": "max", "claude": { "model": "opus", "effort": "max" }, "codex": { "model": "gpt-5.5" } }
+       { "alias": "economy", "claude": { "model": "sonnet", "effort": "medium" }, "codex": { "model": "gpt-5.5", "effort": "medium" } },
+       { "alias": "default", "claude": { "model": "sonnet", "effort": "high" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
+       { "alias": "strong", "claude": { "model": "opus", "effort": "high" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
+       { "alias": "max", "claude": { "model": "opus", "effort": "max" }, "codex": { "model": "gpt-5.5", "effort": "xhigh" } }
      ]
    }
    ```
@@ -192,7 +192,7 @@ There is no merge-strategy config, no rebase path, and no merge-commit-producing
    - Each tier must have a unique non-empty `alias`.
    - Each tier must have `claude.model` and `codex.model`.
    - `claude.effort` is optional but, when present, is passed to Claude as `--effort <value>`.
-   - Codex receives `--model <codex.model>` only; do not invent a Codex effort flag unless the companion explicitly supports it.
+   - `codex.effort` is optional. When present it must be one of `none | minimal | low | medium | high | xhigh` (the reasoning-effort set the installed codex companion v1.0.3 accepts); reject any other value at ladder-load time. It is passed to Codex **task** (implement) primitives only, as `--effort <value>`. Codex **review** primitives (`review` / `adversarial-review`) receive `--model <codex.model>` alone — the companion accepts `--effort` on `task` only. When a rung omits `codex.effort`, no effort flag is passed for that rung (current behavior).
    - `default_start`, when present, must match a tier alias. If absent, use `default` when present, otherwise the first tier.
 
    Print the active ladder before the dispatch plan:
@@ -200,12 +200,14 @@ There is no merge-strategy config, no rebase path, and no merge-commit-producing
    ```text
    Active model ladder: <source path or built-in>
    alias      claude              codex
-   economy    sonnet/medium       gpt-5.5
-   default    sonnet/high         gpt-5.5
-   strong     opus/high           gpt-5.5
-   max        opus/max            gpt-5.5
+   economy    sonnet/medium       gpt-5.5/medium
+   default    sonnet/high         gpt-5.5/high
+   strong     opus/high           gpt-5.5/high
+   max        opus/max            gpt-5.5/xhigh
    default_start: default
    ```
+
+   When a tier omits `claude.effort` or `codex.effort`, print that column as the bare model id with no `/<effort>` suffix (e.g. `gpt-5.5`), matching the optional-effort schema above.
 
    This printout is required even when `--dry-run` is not set. Users should not need to read command source to know which models will run.
 
@@ -318,7 +320,7 @@ State:
 - `SLOTS = --parallel N`
 - `WORKER_LOOPS = --worker-loops N` — forwarded verbatim into the worker spawn as `/ccx:loop --<TASK_WORKER_MODE> --loops <WORKER_LOOPS>`, where `<TASK_WORKER_MODE>` is the same per-task variable §P2.2 substitutes (literal `duet` or `conductor`) per the resolution rule on `WORKER_MODE` below.
 - `WORKER_MODE = --worker-mode {duet,conductor}` — run-level default worker mode. Resolved per task inside Step A: `TASK_WORKER_MODE = TASK.worker_mode` when non-null, otherwise `WORKER_MODE`. The resolved value drives the leading `--duet` / `--conductor` flag inside `$DISPATCH_PROMPT` (see §P2.2). Default is `duet` during M10 incubation; conductor mode is the in-flight design from `docs/supervisor-design.md` §"Conductor Mode (M10 — proposed)".
-- `MODEL_LADDER` — active ladder loaded in P0 step 1b. Built-in aliases are `economy`, `default`, `strong`, and `max`; custom `STATE_DIR/model-ladder.json` may replace the alias set. Each rung is `{alias, claude: {model, effort?}, codex: {model}}`.
+- `MODEL_LADDER` — active ladder loaded in P0 step 1b. Built-in aliases are `economy`, `default`, `strong`, and `max`; custom `STATE_DIR/model-ladder.json` may replace the alias set. Each rung is `{alias, claude: {model, effort?}, codex: {model, effort?}}`.
 - `DEFAULT_START_ALIAS` — active ladder default from `default_start` validation.
 - `START_TIER_OVERRIDE` — `auto` or an explicit active ladder alias from `--start-tier`. `auto` means "use each task's `model_start`, falling back to `DEFAULT_START_ALIAS`."
 - `MAX_WORKER_BUDGET_USD` — run-level `--max-worker-budget-usd` value, or `null` when the flag was not supplied. Resolved once at argument-parse time; forwarded verbatim into every dispatched worker's spawn as `--max-budget-usd <value>` when non-null (see §P2 Step A step 4).
