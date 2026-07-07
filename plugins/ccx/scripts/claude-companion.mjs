@@ -89,6 +89,23 @@ function validateOptions(options) {
   }
 }
 
+// Extracts the CLI envelope's cost/usage/session fields under the companion's own field
+// names (cost_usd, result_subtype) so they stay distinct from any future raw passthrough.
+// Defaults to null per-field when the envelope lacks it (e.g. JSON.parse failed upstream,
+// or a given CLI version doesn't emit it) so every spawnClaude() return has the same shape.
+function extractUsageFields(envelope) {
+  return {
+    cost_usd:
+      typeof envelope.total_cost_usd === "number" ? envelope.total_cost_usd : null,
+    num_turns: typeof envelope.num_turns === "number" ? envelope.num_turns : null,
+    usage:
+      envelope.usage && typeof envelope.usage === "object" ? envelope.usage : null,
+    session_id: typeof envelope.session_id === "string" ? envelope.session_id : null,
+    result_subtype: typeof envelope.subtype === "string" ? envelope.subtype : null,
+    stop_reason: typeof envelope.stop_reason === "string" ? envelope.stop_reason : null,
+  };
+}
+
 // Check if the trailing non-empty line is ^VERDICT:\s*(approve|reject)\s*$ (VERDICT: case-sensitive, value case-insensitive).
 // The conductor's convergence protocol requires VERDICT to be the final line — any preceding
 // example or explanation that contains VERDICT must not trigger extraction.
@@ -171,6 +188,7 @@ async function spawnClaude(options) {
           body: rawStdout,
           exit_code: effectiveExitCode !== 0 ? effectiveExitCode : 1,
           permission_denials: [],
+          ...extractUsageFields({}),
         });
         return;
       }
@@ -184,6 +202,7 @@ async function spawnClaude(options) {
           permission_denials: Array.isArray(envelope.permission_denials)
             ? envelope.permission_denials
             : [],
+          ...extractUsageFields(envelope),
         });
         return;
       }
@@ -200,6 +219,7 @@ async function spawnClaude(options) {
         body: resultText,
         exit_code: effectiveExitCode,
         permission_denials: permissionDenials,
+        ...extractUsageFields(envelope),
       });
     });
   });
