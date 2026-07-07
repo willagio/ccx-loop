@@ -97,7 +97,7 @@ Takes a free-form prompt or a reference to a document the user already wrote (PR
 ### `/ccx:supervisor` — parallel orchestrator
 
 ```
-/ccx:supervisor [--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-loops N] [--worker-mode duet|conductor] [--start-tier auto|economy|default|strong|max] [--chat] [--dry-run]
+/ccx:supervisor [--parallel N] [--integration BRANCH] [--max-tasks M] [--worker-loops N] [--worker-mode duet|conductor] [--start-tier auto|economy|default|strong|max] [--max-worker-budget-usd AMOUNT] [--chat] [--dry-run]
 ```
 
 Drives N parallel workers from `STATE_DIR/BOARD.md`, outside the repo working tree. Each task gets an external worktree under `STATE_DIR/worktrees/`, a brief file under `STATE_DIR/tasks/`, and one squash merge commit on approval. Worker `chat_ask` calls are intercepted by the broker and answered autonomously from the brief / BOARD direction / merge history when possible; ambiguous asks escalate to Discord. The supervisor prints the active model ladder before dispatch and passes the selected start tier to each worker. Workers default to duet mode (`--worker-mode duet`) or conductor mode (`--worker-mode conductor`); Codex advances through the ladder per cycle via `--model`.
@@ -110,17 +110,20 @@ Drives N parallel workers from `STATE_DIR/BOARD.md`, outside the repo working tr
 | `--worker-loops N` | `--loops N` passed to each worker (2–100) | 3 |
 | `--worker-mode <duet\|conductor>` | Worker mode forwarded to each dispatched worker. `duet` (default) or `conductor` (runs each implement/review turn as a fresh sub-process). | `duet` |
 | `--start-tier <alias>` | Override every task's starting rung: `auto \| economy \| default \| strong \| max`. `auto` uses each row's `model_start`. | `auto` |
+| `--max-worker-budget-usd AMOUNT` | Per-worker CLI-enforced spend cap in USD, forwarded to each worker's `claude -p` spawn as `--max-budget-usd AMOUNT`. A worker that hits the cap aborts mid-run and is reported as `budget-exhausted` with remediation to raise or omit the cap. Not yet propagated into conductor-mode's per-turn sub-process spawns (known limitation). | unset (no cap) |
 | `--chat` | Register a supervisor session with the ccx-chat broker and post lifecycle events (dispatch, merge, block, stuck prompt, run end) to Discord | off |
 | `--dry-run` | Print dispatch plan, don't commit or spawn | off |
 
 **Model ladder.** The built-in ladder is fixed and visible, but users can replace it by writing `STATE_DIR/model-ladder.json`. The default Codex model is `gpt-5.5`; no `mini` model is used by default. Claude's selected tier is fixed at worker spawn; Codex uses the ladder per cycle.
 
-| Alias | Claude `--model` | Claude `--effort` | Codex `--model` | Typical use |
-|-------|------------------|-------------------|-----------------|-------------|
-| `economy` | `sonnet` | `medium` | `gpt-5.5` | Small docs, obvious one-file fixes |
-| `default` | `sonnet` | `high` | `gpt-5.5` | Normal implementation tasks |
-| `strong` | `opus` | `high` | `gpt-5.5` | Cross-file logic or ambiguous design |
-| `max` | `opus` | `max` | `gpt-5.5` | Hard failures, architecture, high-risk changes |
+| Alias | Claude `--model` | Claude `--effort` | Codex `--model` | Codex `--effort` | Typical use |
+|-------|------------------|-------------------|-----------------|-------------------|-------------|
+| `economy` | `sonnet` | `medium` | `gpt-5.5` | `medium` | Small docs, obvious one-file fixes |
+| `default` | `sonnet` | `high` | `gpt-5.5` | `high` | Normal implementation tasks |
+| `strong` | `opus` | `high` | `gpt-5.5` | `high` | Cross-file logic or ambiguous design |
+| `max` | `opus` | `max` | `gpt-5.5` | `xhigh` | Hard failures, architecture, high-risk changes |
+
+`gpt-5.5` remains the default Codex model across every rung. A rung's `codex.effort` is optional (`none|minimal|low|medium|high|xhigh`) and, when present, is passed as `--effort <value>` to Codex **implement** turns only — Codex review turns always run with `--model` alone, since the companion doesn't accept `--effort` there. Omitting `codex.effort` on a rung passes no effort flag.
 
 `/ccx:plan` writes `model_start: economy|default|strong|max` on each task row. The planner chooses the cheapest rung it expects can finish the task; the human can edit it before flipping `draft → pending`. `--start-tier auto` respects the row. Passing `--start-tier strong`, for example, overrides every task for that supervisor run.
 
@@ -133,7 +136,7 @@ Custom ladder file:
     {
       "alias": "default",
       "claude": { "model": "sonnet", "effort": "high" },
-      "codex": { "model": "gpt-5.5" }
+      "codex": { "model": "gpt-5.5", "effort": "high" }
     }
   ]
 }
@@ -142,6 +145,8 @@ Custom ladder file:
 The supervisor rejects duplicate aliases, missing `claude.model`, missing `codex.model`, or a `default_start` that is not present in `tiers`. `model_start` values in BOARD must reference an active alias; this keeps task rows readable while letting the operator remap aliases to newer model IDs later without editing every task.
 
 **Supervisor worker mode.** Supervisor workers default to duet mode; pass `--worker-mode conductor` to opt the whole run into conductor mode instead (see Conductor Mode above). The default worker spawn is `/ccx:loop --duet --loops <N> --commit --chat`; `--worker-loops` therefore starts at 2 because duet convergence needs two reviewer turns.
+
+**Worker-spawn robustness.** Each worker's `claude -p` spawn also carries an auto-derived `--fallback-model`: the supervisor walks the active ladder down from the task's start tier to the nearest cheaper rung with a different Claude model (e.g. `strong` falls back to `default`'s `sonnet`; `max` skips past `strong`, which also uses `opus`, to `default`), letting the CLI itself survive a primary-model overload without failing the worker outright. When no cheaper rung has a different Claude model, `--fallback-model` is omitted. Combine with `--max-worker-budget-usd` above for a per-worker dollar ceiling.
 
 **M8a infra notes.** Worker exit detection reads `claude agents --json` (matched by `cwd == meta.worktree_path`), and Phase P0 best-effort fast-forwards your local integration branch to `origin/<INTEGRATION>` so each worker worktree forks from a fresh upstream base. If there is no remote, the supervisor uses local HEAD.
 

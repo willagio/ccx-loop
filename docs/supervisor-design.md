@@ -101,15 +101,24 @@ The built-in ladder maps those aliases to Claude/Codex settings:
 {
   "default_start": "default",
   "tiers": [
-    { "alias": "economy", "claude": { "model": "sonnet", "effort": "medium" }, "codex": { "model": "gpt-5.5" } },
-    { "alias": "default", "claude": { "model": "sonnet", "effort": "high" }, "codex": { "model": "gpt-5.5" } },
-    { "alias": "strong", "claude": { "model": "opus", "effort": "high" }, "codex": { "model": "gpt-5.5" } },
-    { "alias": "max", "claude": { "model": "opus", "effort": "max" }, "codex": { "model": "gpt-5.5" } }
+    { "alias": "economy", "claude": { "model": "sonnet", "effort": "medium" }, "codex": { "model": "gpt-5.5", "effort": "medium" } },
+    { "alias": "default", "claude": { "model": "sonnet", "effort": "high" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
+    { "alias": "strong", "claude": { "model": "opus", "effort": "high" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
+    { "alias": "max", "claude": { "model": "opus", "effort": "max" }, "codex": { "model": "gpt-5.5", "effort": "xhigh" } }
   ]
 }
 ```
 
+Each rung's `codex` object carries an optional `effort` field (`none | minimal | low | medium | high | xhigh`, the reasoning-effort set the installed codex companion accepts). It is passed as `--effort <value>` to Codex **task** (implement) turns only — the companion does not accept `--effort` on `review` / `adversarial-review`, so Codex review turns always run with `--model` alone regardless of what the rung specifies. Omitting `codex.effort` on a rung passes no effort flag for that rung's implement turns, preserving the pre-T-8 behavior. `gpt-5.5` remains the default Codex model in the built-in ladder — unchanged by this field.
+
 Claude is fixed by the worker's initial `claude -p --model/--effort` spawn. The supervisor does not claim to change Claude's in-session model by cycle.
+
+### Worker-spawn robustness flags
+
+Two supervisor flags shape the `claude -p` spawn template independently of the model ladder:
+
+- `--fallback-model` is auto-derived per task, not user-supplied. Immediately after resolving the task's start tier, the supervisor walks the active ladder downward from the start tier looking for the nearest cheaper rung whose `claude.model` differs from the start tier's — e.g. `strong` (`opus`) falls back to `default` (`sonnet`), while `max` (`opus`) skips past `strong` (also `opus`) to `default` (`sonnet`). When found, it is passed to the worker's `claude -p` spawn as `--fallback-model <model>`, letting that single process survive a primary-model overload (e.g. Opus capacity errors during a large `--parallel` burst) by transparently falling back at the CLI level. When no cheaper rung has a different Claude model, `--fallback-model` is omitted entirely. This is independent of the worker's own in-session ladder advancement (duet/conductor per-cycle Codex tier escalation) — it only engages when the `claude` CLI itself decides the primary model is unavailable.
+- `--max-worker-budget-usd AMOUNT` is an optional run-level supervisor flag (unset by default). When supplied, it is forwarded verbatim into every dispatched worker's `claude -p` spawn as `--max-budget-usd AMOUNT`, turning `budget-exhausted` from a purely heuristic exit (the worker ran out of `--loops` cycles) into a CLI-enforced hard dollar cap that can abort the process mid-run. The supervisor's completion classifier recognizes this CLI-enforced abort (via the worker log's `error_max_budget_usd` / `Exceeded USD budget` markers) and reports it as `budget-exhausted` with remediation guidance to raise or omit the cap, rather than as a generic crash. **Known limitation:** under `--worker-mode conductor`, the cap only bounds the conductor's own lightweight orchestration spend — it does not propagate to the per-turn `claude -p` sub-processes the conductor delegates to, since those spawns are owned by `/ccx:loop`'s Phase 2-Conductor rather than the supervisor's spawn template.
 
 ## Merge
 
