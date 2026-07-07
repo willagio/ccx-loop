@@ -390,9 +390,11 @@ A2. **Skip A2 entirely when `STOP_DISPATCHING == true`** — no slot-fill, no ov
      CCX_TASK_ID="<TASK.id>" \
      CCX_MODEL_LADDER_PATH="<STATE_DIR>/model-ladder.effective.json" \
      CCX_MODEL_START_TIER="<TASK_START_ALIAS>" \
+     CCX_EXPECTED_BRANCH="duet/<TASK.id>" \
      claude -p \
      --permission-mode bypassPermissions \
      --no-session-persistence \
+     <BRANCH_GUARD_SETTINGS_ARG> \
      --output-format stream-json \
      --model <TASK_START_TIER.claude.model> \
      <TASK_FALLBACK_MODEL_ARG> \
@@ -403,6 +405,29 @@ A2. **Skip A2 entirely when `STOP_DISPATCHING == true`** — no slot-fill, no ov
    ```
 
    `<STATE_DIR>` in the env-var assignments is the supervisor's resolved absolute path, substituted at template-render time (NOT the literal token `STATE_DIR`). The task vars define the M9 worker-side contract that `/ccx:loop` Phase 0.5's brief-read exception enforces: `CCX_TASK_BRIEF_PATH` is the exact absolute path the worker is permitted to `Read` for its brief, `CCX_TASK_ID` is the task id the worker must see in the dispatch prompt's `<task_brief id="…">` attribute, and `CCX_STATE_DIR` is reserved for future M9 workers that need to write secondary state. The model vars define the duet ladder contract; the effective ladder file is supervisor-written even when the user did not provide a custom `model-ladder.json`, so workers always read one concrete JSON shape.
+
+   `CCX_EXPECTED_BRANCH="duet/<TASK.id>"` and `<BRANCH_GUARD_SETTINGS_ARG>` together install the **branch-guard** — a deterministic backstop against the worker committing to the integration branch (e.g. `main`) instead of its own `duet/<TASK.id>` branch, which would bypass the squash-merge gate. `CCX_EXPECTED_BRANCH` is the worker's own branch (the same `duet/<TASK.id>` that Step A step 3a's worktree resolver checked out and that cleanup deletes on the merged exit). The settings file registers a `PreToolUse(Bash)` hook running `plugins/ccx/scripts/branch-guard-hook.mjs`; the hook reads `CCX_EXPECTED_BRANCH` from the inherited spawn env, and on any `git commit` (or other commit-creating git subcommand) whose resolved branch differs from that value it returns `permissionDecision: "deny"` so the commit never runs. Because the hook keys off the env var, manual `/ccx:loop` runs (which never set `CCX_EXPECTED_BRANCH`) are unaffected — the hook no-ops and allows every command. Hooks run outside the model context, so the guard costs zero tokens.
+
+   **Node preflight.** The hook command is `node "<HOOK_SCRIPT>"`, so it needs a `node` on PATH. Resolve `BRANCH_GUARD_SETTINGS_ARG` ONCE at the top of the dispatch run (cache it; it is the same for every worker): if `command -v node` succeeds, `BRANCH_GUARD_SETTINGS_ARG="--settings \"<STATE_DIR>/workers/<TASK.id>.settings.json\""` (per-task path substituted at render time) and the settings file is generated per below; if `node` is absent, set `BRANCH_GUARD_SETTINGS_ARG=""` (empty — the spawn omits `--settings`), skip settings-file generation, and log ONE stderr warning: `ccx: node not found — branch-guard hook disabled for this run (workers commit unguarded)`. This degrades gracefully rather than installing a hook that would fail on every worker Bash call. In practice `node` is present whenever the `claude` CLI is (the CLI is itself a Node program the supervisor already depends on), so the warning path is a belt-and-suspenders fallback, not the common case. `CCX_EXPECTED_BRANCH` is still forwarded regardless; without the hook it is simply an unread env var.
+
+   **Generate the settings file BEFORE the spawn** (it must exist when `--settings` resolves it) when the node preflight passed. Resolve the hook script's absolute path from the plugin root — `HOOK_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/branch-guard-hook.mjs"` — and bake that resolved absolute path into the file rather than emitting a `${CLAUDE_PLUGIN_ROOT}` placeholder: `CLAUDE_PLUGIN_ROOT` is set in the supervisor's plugin-command context but is NOT guaranteed in the worker's hook-execution env, so a placeholder would fail to expand at hook time. Write `<STATE_DIR>/workers/<TASK.id>.settings.json` (the `workers/` directory already exists from P0) with exactly this shape, substituting the resolved absolute `HOOK_SCRIPT`:
+
+   ```json
+   {
+     "hooks": {
+       "PreToolUse": [
+         {
+           "matcher": "Bash",
+           "hooks": [
+             { "type": "command", "command": "node \"<HOOK_SCRIPT>\"" }
+           ]
+         }
+       ]
+     }
+   }
+   ```
+
+   `--settings` merges over the worker's normal settings hierarchy (it overrides only the keys it names and leaves the rest file-based), so injecting `hooks.PreToolUse` here does not disturb the worker's other configuration. **Design choice — generated file over inline JSON:** a per-task file under `STATE_DIR/workers/` keeps the JSON out of the already-dense env-prefixed spawn line (no fragile shell-escaping of a brace-and-quote blob), gives the operator an auditable artifact of exactly which hook each worker received alongside its `<TASK.id>.log`, and is referenced by a single stable path. This mirrors the log-path rationale below.
 
    The log path stays under `STATE_DIR/workers/` (the supervisor's log directory created in P0), NOT under the worktree — worker logs survive worktree teardown and the supervisor's P3 report references this absolute path.
 
