@@ -220,9 +220,9 @@ Each conductor decision (tier choice, side choice, stuck judgment, exit) is appe
 
 ### Open questions
 
-1. **Cost crossover.** Many short subprocess invocations vs one long in-session — measure the cycle count beyond which conductor mode wins on tokens. Expected to land between cycle 10 and 20.
+1. **Cost crossover.** Many short subprocess invocations vs one long in-session — measure the cycle count beyond which conductor mode wins on tokens. Expected to land between cycle 10 and 20. *Status 2026-07: still open.* The shipped cost-aware tier guidance in `loop.md` Phase 2-Conductor addresses a *related* per-side concern (stop escalating a side whose per-turn implement cost climbs without convergence progress) but does not answer this question — the conductor-vs-duet token-economics measurement remains to be done.
 2. **Stuck judgment false positives.** LLM "is this the same complaint as last cycle" may end runs early. Default conservatively (require high confidence; fall back to tuple-equality when uncertain).
-3. **Per-cycle Codex effort.** `codex-companion.mjs` currently accepts `--model` only. Investigate whether newer Codex CLIs expose an effort flag the companion can forward.
+3. **Per-cycle Codex effort.** ~~`codex-companion.mjs` currently accepts `--model` only. Investigate whether newer Codex CLIs expose an effort flag the companion can forward.~~ *Resolved 2026-07:* companion v1.0.3 documents `--effort <none|minimal|low|medium|high|xhigh>` on `task` (implement turns only; `review` still takes `--model` alone). Ladder rungs carry an optional `codex.effort` that the duet and conductor drivers forward accordingly — see "Worker-spawn robustness flags" and the built-in ladder above.
 4. **Conductor self-eviction.** If the conductor's own context grows large despite delegation, define a fallback: hand off audit log + state to a successor `claude -p` and exit. Probably out of scope for M10; flagged for M11.
 
 ### Non-goals for M10
@@ -231,6 +231,16 @@ Each conductor decision (tier choice, side choice, stuck judgment, exit) is appe
 - Concurrent sub-implementer execution within one worker (turns remain serial within one task).
 - Cross-worker tier policy sharing (each conductor decides independently).
 - Migration of in-flight M8b runs to conductor mode (the modes coexist; new runs choose at start).
+
+## Post-M10 hardening (2026-07)
+
+Shipped after M10 as a freshness/robustness wave. Each item is additive to the contracts above; the authoritative spec text lives in `plugins/ccx/commands/supervisor.md` and `loop.md`.
+
+- **Cost-aware conductor tier policy** (`loop.md` §Phase 2-Conductor). The Claude companion envelope passes through per-turn accounting (`cost_usd`, `num_turns`, `result_subtype`, `stop_reason`); the conductor records it in `implement_cost_by_side` / `cycle_log` and a `turn-cost` audit family, and the adaptive tier policy consults it as advisory guidance (per-side cost-crossover guard, affordable escalation, confirmed economy). Envelopes carrying `error_max_budget_usd` / `error_max_turns` terminate the run as a runtime-enforced `budget-exhausted` — the CLI ceiling, not the cycle-count heuristic. Codex-side accounting is `null` on companion v1.0.3; the policy only weighs sides with non-null observations.
+- **Branch-guard hook** (`plugins/ccx/scripts/branch-guard-hook.mjs`). A `PreToolUse` hook injected into worker spawns via `--settings`, blocking any `git commit` when the current branch differs from `$CCX_EXPECTED_BRANCH` (`duet/<task_id>`). Deterministic enforcement of the commit-on-worker-branch rule that prompt-level instructions alone failed to guarantee (a worker once committed directly to main). No-ops when the env var is unset (manual runs).
+- **Compaction anchors** (`supervisor.md` §P2 Step A step 4). Worker spawns carry `--append-system-prompt` with a <~800-char anchor (task id, brief path, convergence rule, EDITED_PATHS duty, worker-branch rule). System-prompt content is re-sent on every request, so the anchor survives Claude Code's lossy auto-compaction — the M10 motivation, now mitigated for duet mode too. The §P2.5 resume path reuses every spawn-template flag verbatim (template is SSOT), so anchors survive resume.
+- **Resume-redispatch** (`supervisor.md` §P2.5 step 0). Workers spawn with plain `--output-format json`; the supervisor captures `session_id` from the final envelope and, when a worker exits on the cycle cap, resumes the same session once via `claude --resume` with a fresh cycle budget instead of rebuilding context from scratch. Bounded to one attempt; skipped when `--max-worker-budget-usd` is set (a second process would double the per-worker ceiling); persisted sessions are purged at every terminal cleanup site.
+- **Agent SDK companion backend — evaluated, no-go for now** (`docs/sdk-companion-poc-notes.md`). Rewriting `claude-companion.mjs` on `@anthropic-ai/claude-agent-sdk` was prototyped and rejected for now; the CLI shell-out stays. The PoC notes list the concrete triggers that would reopen the decision — treat that doc as the seed for a future supervisor-as-code milestone.
 
 ## Non-Goals
 

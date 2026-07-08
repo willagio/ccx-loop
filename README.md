@@ -216,6 +216,7 @@ Phase 4: Commit (gated — unresolved / test failure / cap-hit / stuck-exit bloc
 - **Explicit staging.** Only files the loop intentionally edits (Edit/Write + intentional Bash ops like `mv`, `rm`, formatters) are staged. Generated artifacts like coverage output never slip in.
 - **Dirty-tree handling.** Pre-existing uncommitted changes are parsed via `git status -z` and handled explicitly. A hunk-granularity caveat is documented: if Claude edits a file that was already dirty, the user's prior hunks will be committed too (stash to avoid).
 - **Duet mode** (`--duet`). Two different reviewers (Codex and Claude) must approve consecutively to terminate. Any reject by either reviewer, or any non-empty implementer diff between the two approvals, resets the convergence counter. Under `/ccx:supervisor`, Claude uses the resolved start tier for the whole worker and Codex uses the active ladder per cycle.
+- **Worker hardening** (supervisor-dispatched workers). Every spawn carries a compaction-surviving system-prompt anchor (task id, convergence rule, staging duty), and a branch-guard hook blocks any `git commit` off the worker's `duet/<task>` branch. A worker that exhausts its cycle budget is resumed once via `claude --resume` with its context intact instead of being re-dispatched from scratch (skipped when `--max-worker-budget-usd` is set, so the per-worker spend ceiling is never doubled).
 
 If Codex is not installed, implementation is preserved on disk and you're prompted to install it — no unreviewed commit.
 
