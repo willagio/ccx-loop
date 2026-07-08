@@ -262,7 +262,7 @@ If committing:
 - Staging set = `EDITED_PATHS ∪ PRE_LOOP_PATHS` (when the user accepted pre-existing changes in Phase 0). Both are plain path sets — stage them with explicit `git add -- <path>` calls. Note both sets in the commit message so the scope is auditable, and note the hunk-granularity caveat for any path in `EDITED_PATHS ∩ PRE_LOOP_PATHS`.
 - Never use `git add -A` or `git add .` — stage explicit paths only, so untracked generated files and editor swap files never slip in.
 - Write a concise commit message describing the task and summarizing any significant findings fixed.
-- Include `Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>`.
+- Include `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 - **Pass the draft through the commit-message style-mirror below** before invoking `git commit`, so the message matches the repo's existing convention.
 
 ### Commit message style-mirror

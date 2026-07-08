@@ -119,8 +119,8 @@ Drives N parallel workers from `STATE_DIR/BOARD.md`, outside the repo working tr
 | Alias | Claude `--model` | Claude `--effort` | Codex `--model` | Codex `--effort` | Typical use |
 |-------|------------------|-------------------|-----------------|-------------------|-------------|
 | `economy` | `sonnet` | `medium` | `gpt-5.5` | `medium` | Small docs, obvious one-file fixes |
-| `default` | `sonnet` | `high` | `gpt-5.5` | `high` | Normal implementation tasks |
-| `strong` | `opus` | `high` | `gpt-5.5` | `high` | Cross-file logic or ambiguous design |
+| `default` | `sonnet` | `xhigh` | `gpt-5.5` | `high` | Normal implementation tasks |
+| `strong` | `opus` | `xhigh` | `gpt-5.5` | `high` | Cross-file logic or ambiguous design |
 | `max` | `opus` | `max` | `gpt-5.5` | `xhigh` | Hard failures, architecture, high-risk changes |
 
 `gpt-5.5` remains the default Codex model across every rung. A rung's `codex.effort` is optional (`none|minimal|low|medium|high|xhigh`) and, when present, is passed as `--effort <value>` to Codex **implement** turns only — Codex review turns always run with `--model` alone, since the companion doesn't accept `--effort` there. Omitting `codex.effort` on a rung passes no effort flag.

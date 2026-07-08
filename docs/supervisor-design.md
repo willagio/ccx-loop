@@ -102,8 +102,8 @@ The built-in ladder maps those aliases to Claude/Codex settings:
   "default_start": "default",
   "tiers": [
     { "alias": "economy", "claude": { "model": "sonnet", "effort": "medium" }, "codex": { "model": "gpt-5.5", "effort": "medium" } },
-    { "alias": "default", "claude": { "model": "sonnet", "effort": "high" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
-    { "alias": "strong", "claude": { "model": "opus", "effort": "high" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
+    { "alias": "default", "claude": { "model": "sonnet", "effort": "xhigh" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
+    { "alias": "strong", "claude": { "model": "opus", "effort": "xhigh" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
     { "alias": "max", "claude": { "model": "opus", "effort": "max" }, "codex": { "model": "gpt-5.5", "effort": "xhigh" } }
   ]
 }

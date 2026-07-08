@@ -180,8 +180,8 @@ There is no merge-strategy config, no rebase path, and no merge-commit-producing
      "default_start": "default",
      "tiers": [
        { "alias": "economy", "claude": { "model": "sonnet", "effort": "medium" }, "codex": { "model": "gpt-5.5", "effort": "medium" } },
-       { "alias": "default", "claude": { "model": "sonnet", "effort": "high" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
-       { "alias": "strong", "claude": { "model": "opus", "effort": "high" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
+       { "alias": "default", "claude": { "model": "sonnet", "effort": "xhigh" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
+       { "alias": "strong", "claude": { "model": "opus", "effort": "xhigh" }, "codex": { "model": "gpt-5.5", "effort": "high" } },
        { "alias": "max", "claude": { "model": "opus", "effort": "max" }, "codex": { "model": "gpt-5.5", "effort": "xhigh" } }
      ]
    }
@@ -201,8 +201,8 @@ There is no merge-strategy config, no rebase path, and no merge-commit-producing
    Active model ladder: <source path or built-in>
    alias      claude              codex
    economy    sonnet/medium       gpt-5.5/medium
-   default    sonnet/high         gpt-5.5/high
-   strong     opus/high           gpt-5.5/high
+   default    sonnet/xhigh        gpt-5.5/high
+   strong     opus/xhigh          gpt-5.5/high
    max        opus/max            gpt-5.5/xhigh
    default_start: default
    ```
@@ -400,6 +400,7 @@ A2. **Skip A2 entirely when `STOP_DISPATCHING == true`** — no slot-fill, no ov
      --model <TASK_START_TIER.claude.model> \
      <TASK_FALLBACK_MODEL_ARG> \
      <CLAUDE_EFFORT_ARG> \
+     --append-system-prompt "<APPEND_SYSTEM_PROMPT_TEXT>" \
      <MAX_WORKER_BUDGET_USD_ARG> \
      "$DISPATCH_PROMPT" \
      > "<STATE_DIR>/workers/<TASK.id>.log" 2>&1
@@ -443,6 +444,14 @@ A2. **Skip A2 entirely when `STOP_DISPATCHING == true`** — no slot-fill, no ov
    `<TASK_FALLBACK_MODEL_ARG>` is either `--fallback-model <TASK_FALLBACK_MODEL>` or an empty string when the walk-down in resolution rule (c) above finds no cheaper tier with a different Claude model. `--fallback-model` lets a single dispatched `claude -p` process survive a primary-model overload (e.g. Opus capacity errors during a large `--parallel` burst) by transparently falling back to the next-cheaper ladder rung's Claude model instead of the worker failing outright. This is independent of the worker's own in-session ladder-advancement logic (duet/conductor per-cycle tier escalation, which stays pinned to `TASK_START_TIER` for Claude per the existing contract) — `--fallback-model` only engages when the `claude` CLI's own retry/overload handling decides the primary model is unavailable, not on every request, and it never changes which model the worker driver believes it is running.
 
    `<MAX_WORKER_BUDGET_USD_ARG>` is `--max-budget-usd <MAX_WORKER_BUDGET_USD>` when `--max-worker-budget-usd` was supplied at supervisor invocation, else an empty string. Unlike `<TASK_FALLBACK_MODEL_ARG>`, this is a single run-level value resolved once at argument-parse time (§P2 state map) rather than per-task, and the same resolved string is reused verbatim across every dispatch in the run. When set, it turns a worker's `budget-exhausted` exit from a heuristic decision (the driver ran out of `--loops N` cycles) into a real CLI-enforced hard ceiling: `claude -p` itself aborts the process once the dollar cap is hit, independent of which cycle the worker driver is on. See "Design note — `--max-worker-budget-usd` placement" above for why this is a supervisor flag rather than a ladder field or `STATE_DIR` config knob.
+
+   `--append-system-prompt "<APPEND_SYSTEM_PROMPT_TEXT>"` is a compaction-resilience anchor: unlike the `$DISPATCH_PROMPT` user turn, system-prompt content is re-sent on every request and survives Claude Code's lossy auto-compaction, so this is where the facts a compacted worker must never lose belong. `<APPEND_SYSTEM_PROMPT_TEXT>` is a fixed, per-task-substituted template (kept under ~800 chars — it is paid on every request) carrying: the task id, the brief path (read-only per the M9 brief-read exception), the duet/conductor convergence rule (stop only after two consecutive approvals from two different reviewers), the automatic edited-path capture that Phase 4 uses for staging, and the commit-on-worker-branch rule:
+
+   ```
+   ccx duet/conductor worker anchors (survive compaction): task=<TASK.id> brief=<STATE_DIR>/tasks/<TASK.id>.md (read-only, M9 brief-read exception). Convergence = two consecutive approvals from two DIFFERENT reviewers (Claude and Codex); other exits (stuck, cycle cap, abort) still apply. Track every file you create/edit/delete in EDITED_PATHS (snapshot-diff accounting) — Phase 4 stages those paths (plus any Phase-0-accepted pre-existing paths) with git add -- <path>. Commit only on branch duet/<TASK.id>.
+   ```
+
+   This flag is unconditional (no `_ARG` empty-string branch) and applies identically to both `--duet` and `--conductor` dispatches, since both worker modes share this single spawn template per the shared-spawn-env note above — only the leading `--duet` / `--conductor` token inside `$DISPATCH_PROMPT` differs between modes.
 
    Build `DISPATCH_PROMPT` per §P2.2. Use a shell heredoc into a variable so embedded newlines and `<` characters survive unquoted:
 
@@ -1021,7 +1030,7 @@ Algorithm:
 
    a. **Build `RESUME_PROMPT`.** Prefix a one-paragraph preamble to the SAME `$DISPATCH_PROMPT` §P2.2 builds for this task (leading `/ccx:loop --<worker_mode_resolved> --loops <WORKER_LOOPS> --commit` plus `--chat` when the run has it, followed by the `<task_brief>` block). The preamble states: the prior turn exhausted its `--loops` cycle budget without reaching convergence; the full conversation context and the worktree contents are preserved; treat the current worktree state as the in-progress implementation and continue the loop rather than rebuilding from scratch. The `--loops <WORKER_LOOPS>` counter resets for this fresh `-p` invocation, so the resumed worker gets a full cycle budget again while keeping the accumulated context — which is the entire point (it avoids the full-context rebuild the brief calls out).
 
-   b. **Spawn with the Step A step 4 template, plus `--resume`, minus worktree creation.** First capture `RESUME_STARTED_AT = <now>` **immediately before** the spawn (the same pre-spawn timestamp discipline Step A step 4 uses for `STARTED_AT`) — step d reuses it so the worker-close classifier window covers the resumed worker's entire lifetime including the 3s liveness check. A resumed worker can cycle-cap or go stuck within that window and `chat_close` before the liveness check returns; a post-spawn timestamp would sit *after* that close, so Step B step 4's `at >= meta.started_at` recent-closures filter would drop the resumed attempt's closure and misroute it to generic `no-commit` instead of cycle-cap/stuck. Then reuse `cd "<meta.worktree_path>"`, the same `CCX_*` env vars, and the same `--model` / `--effort` / `<TASK_FALLBACK_MODEL_ARG>` / `<BRANCH_GUARD_SETTINGS_ARG>` / `<MAX_WORKER_BUDGET_USD_ARG>` / `--output-format json` flags, with three differences: add `--resume "<meta.session_id>"`, pass `RESUME_PROMPT` (not the bare `$DISPATCH_PROMPT`) as the positional prompt argument, and skip Step A step 3a's `git worktree add` (the worktree already exists). Redirect with `>>` (append) rather than `>` so attempt 1's envelope stays in `STATE_DIR/workers/<task_id>.log` for the operator; the session_id re-capture in Step B step 2 uses `tail -1`, so the appended second envelope's id (identical, since the session is not forked) is what it reads. Because the spawn template no longer passes `--no-session-persistence`, the resumed session is itself persisted — but the `resume_attempts < 1` bound, not persistence, is what stops a second resume.
+   b. **Spawn with the Step A step 4 template, plus `--resume`, minus worktree creation.** First capture `RESUME_STARTED_AT = <now>` **immediately before** the spawn (the same pre-spawn timestamp discipline Step A step 4 uses for `STARTED_AT`) — step d reuses it so the worker-close classifier window covers the resumed worker's entire lifetime including the 3s liveness check. A resumed worker can cycle-cap or go stuck within that window and `chat_close` before the liveness check returns; a post-spawn timestamp would sit *after* that close, so Step B step 4's `at >= meta.started_at` recent-closures filter would drop the resumed attempt's closure and misroute it to generic `no-commit` instead of cycle-cap/stuck. Then reuse `cd "<meta.worktree_path>"`, the same `CCX_*` env vars, and **every flag from the Step A step 4 spawn template verbatim** — the template is the SSOT for the flag set; do NOT rebuild the list by hand (a hand-maintained copy here drifted once already, silently dropping the compaction anchor from resumed workers). For the avoidance of doubt that includes `--permission-mode bypassPermissions`, `<BRANCH_GUARD_SETTINGS_ARG>`, `--output-format json`, `--model` / `<CLAUDE_EFFORT_ARG>` / `<TASK_FALLBACK_MODEL_ARG>`, `--append-system-prompt "<APPEND_SYSTEM_PROMPT_TEXT>"`, and `<MAX_WORKER_BUDGET_USD_ARG>`, with three differences: add `--resume "<meta.session_id>"`, pass `RESUME_PROMPT` (not the bare `$DISPATCH_PROMPT`) as the positional prompt argument, and skip Step A step 3a's `git worktree add` (the worktree already exists). Redirect with `>>` (append) rather than `>` so attempt 1's envelope stays in `STATE_DIR/workers/<task_id>.log` for the operator; the session_id re-capture in Step B step 2 uses `tail -1`, so the appended second envelope's id (identical, since the session is not forked) is what it reads. Because the spawn template no longer passes `--no-session-persistence`, the resumed session is itself persisted — but the `resume_attempts < 1` bound, not persistence, is what stops a second resume.
 
    c. **Liveness-check the resume** exactly as Step A step 5 does (`sleep 3` + `BashOutput`). If the resumed spawn fails the liveness check, fall through to step 1's block path — the resume did not take, and it is not retried.
 
