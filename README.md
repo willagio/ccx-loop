@@ -17,7 +17,7 @@ The plugin ships four commands:
 
 ```bash
 # 1. Add the marketplace
-claude plugin marketplace add willysk73/ccx-loop
+claude plugin marketplace add willagio/ccx-loop
 
 # 2. Install the plugin
 claude plugin install ccx@ccx-loop
@@ -26,7 +26,7 @@ claude plugin install ccx@ccx-loop
 Or from inside Claude Code:
 
 ```
-/plugin marketplace add willysk73/ccx-loop
+/plugin marketplace add willagio/ccx-loop
 /plugin install ccx@ccx-loop
 ```
 

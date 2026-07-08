@@ -6,8 +6,8 @@
   "metadata": {
     "description": "Claude Code plugin for automated dev loops with Codex review gates.",
     "version": "0.6.0",
-    "homepage": "https://github.com/willysk73/ccx-loop",
-    "repository": "https://github.com/willysk73/ccx-loop",
+    "homepage": "https://github.com/willagio/ccx-loop",
+    "repository": "https://github.com/willagio/ccx-loop",
     "license": "MIT"
   },
   "plugins": [
