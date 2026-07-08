@@ -9,11 +9,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/willysk73/ccx-loop.git"
+    "url": "git+https://github.com/willagio/ccx-loop.git"
   },
-  "homepage": "https://github.com/willysk73/ccx-loop#readme",
+  "homepage": "https://github.com/willagio/ccx-loop#readme",
   "bugs": {
-    "url": "https://github.com/willysk73/ccx-loop/issues"
+    "url": "https://github.com/willagio/ccx-loop/issues"
   },
   "keywords": [
     "claude-code",
